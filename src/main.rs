@@ -510,6 +510,9 @@ async fn enable_monitors(
                 HashMap::<String, OwnedValue>::new(),     // properties
             );
 
+            // Calculate physical width considering the scale factor
+            let logical_width = (mode.width as f64 / mode.preferred_scale).round() as i32;
+
             // Create logical monitor config
             let logical_config = (
                 current_x,                // x
@@ -523,8 +526,8 @@ async fn enable_monitors(
             // Add to configurations
             configs.push(logical_config);
 
-            // Update position for next monitor
-            current_x += mode.width;
+            // Update position for next monitor using logical width
+            current_x += logical_width;
         }
     }
 
