@@ -48,6 +48,9 @@ enum DisplayCommand {
     /// Mirror internal and external monitors
     Mirror(MonitorPattern),
 
+    /// Test pattern matching against current monitors
+    Test(MonitorPattern),
+
     /// Run multiple rules in sequence (first match wins)
     #[command(alias = "rules")]
     Auto {
@@ -267,6 +270,7 @@ impl DisplayRule {
 
 fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
     match command {
+        DisplayCommand::Test(_) => unreachable!(),
         DisplayCommand::Status => vec![],
         DisplayCommand::External(pattern) => vec![DisplayRule {
             mode: DisplayMode::External,
@@ -456,10 +460,17 @@ async fn main() -> Result<()> {
     // Get current state
     let current_state: CurrentState = proxy.get_current_state().await?.into();
 
-    // If this is a status command, just display and exit
-    if let DisplayCommand::Status = &args.command {
-        display_status(&current_state).await?;
-        return Ok(());
+    // Handle different commands
+    match &args.command {
+        DisplayCommand::Status => {
+            display_status(&current_state).await?;
+            return Ok(());
+        }
+        DisplayCommand::Test(pattern) => {
+            test_pattern_matching(pattern, &current_state).await?;
+            return Ok(());
+        }
+        _ => {}
     }
 
     // Extract rules from command
@@ -697,5 +708,87 @@ async fn enable_monitors(
         .await?;
 
     println!("Monitor configuration applied successfully!");
+    Ok(())
+}
+
+async fn test_pattern_matching(
+    pattern: &MonitorPattern,
+    current_state: &CurrentState,
+) -> Result<()> {
+    println!("=== Testing Pattern Matching ===");
+
+    // Print the pattern being tested
+    println!("Testing pattern:");
+    if let Some(connector) = &pattern.connector {
+        println!("  Connector: {}", connector);
+    }
+    if let Some(vendor) = &pattern.vendor {
+        println!("  Vendor: {}", vendor);
+    }
+    if let Some(product) = &pattern.product {
+        println!("  Product: {}", product);
+    }
+    if let Some(serial) = &pattern.serial {
+        println!("  Serial: {}", serial);
+    }
+    if let Some(name) = &pattern.name {
+        println!("  Display Name: {}", name);
+    }
+
+    if pattern.is_empty() {
+        println!("\nPattern is empty - will match ALL monitors");
+    }
+
+    println!("\nResults:");
+
+    let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
+        current_state.monitors.iter().partition(Monitor::is_builtin);
+
+    // Check internal monitors
+    println!("\nInternal Monitors:");
+    if internal_monitors.is_empty() {
+        println!("  None found");
+    } else {
+        for (i, monitor) in internal_monitors.iter().enumerate() {
+            let matches = pattern.matches(monitor);
+            println!(
+                "  {}. {} ({}): {}",
+                i + 1,
+                monitor.display_name,
+                monitor.connector_info.connector,
+                if matches { "MATCH" } else { "no match" }
+            );
+        }
+    }
+
+    // Check external monitors
+    println!("\nExternal Monitors:");
+    if external_monitors.is_empty() {
+        println!("  None found");
+    } else {
+        for (i, monitor) in external_monitors.iter().enumerate() {
+            let matches = pattern.matches(monitor);
+            println!(
+                "  {}. {} ({}): {}",
+                i + 1,
+                monitor.display_name,
+                monitor.connector_info.connector,
+                if matches { "MATCH" } else { "no match" }
+            );
+        }
+    }
+
+    // Summary
+    let total_matches = current_state
+        .monitors
+        .iter()
+        .filter(|m| pattern.matches(m))
+        .count();
+    println!(
+        "\nSummary: {} of {} monitors matched the pattern",
+        total_matches,
+        current_state.monitors.len()
+    );
+
     Ok(())
 }
