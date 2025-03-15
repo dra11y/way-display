@@ -2,7 +2,6 @@ mod display_config;
 mod structs;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use anyhow::{Context as AnyhowContext, Result};
 use clap::{Args, Parser, Subcommand};
@@ -22,9 +21,10 @@ struct CliArgs {
     #[arg(short, long)]
     watch: bool,
 
+    /// TODO: (Not yet implemented)
     /// Optional configuration file with display rules
-    #[arg(short, long)]
-    config: Option<PathBuf>,
+    // #[arg(short, long)]
+    // config: Option<PathBuf>,
 
     /// Display commands to execute, in order of preference
     #[command(subcommand)]
@@ -33,19 +33,23 @@ struct CliArgs {
 
 #[derive(Debug, Subcommand, Clone)]
 enum DisplayCommand {
-    /// Show current monitor configuration
-    Status,
+    /// Show current monitor configuration (--modes to include display modes)
+    Status {
+        /// Include detailed information about available display modes
+        #[arg(short, long)]
+        modes: bool,
+    },
 
-    /// Use only the external monitor if connected
+    /// Use only the external monitor (if connected)
     External(MonitorPattern),
 
-    /// Use only the internal monitor
+    /// Use only the internal monitor (if exists)
     Internal(MonitorPattern),
 
     /// Enable internal and external monitors side by side
     Join(MonitorPattern),
 
-    /// Mirror internal and external monitors
+    /// Mirror internal and external monitors (uses the highest resolution common mode)
     Mirror(MonitorPattern),
 
     /// Test pattern matching against current monitors
@@ -202,7 +206,62 @@ fn print_monitor(i: usize, monitor: &Monitor) {
     }
 }
 
-async fn display_status(current_state: &CurrentState) -> Result<()> {
+fn print_modes(monitor: &Monitor) {
+    println!("     Available Modes (* = current, P = preferred):");
+
+    // Create a vector of references to the modes for sorting
+    let mut modes = monitor.modes.iter().collect::<Vec<_>>();
+
+    // Sort modes by resolution (width*height) in descending order, then by refresh rate
+    modes.sort_by(|a, b| {
+        let a_pixels = a.width * a.height;
+        let b_pixels = b.width * b.height;
+
+        // First sort by resolution (descending)
+        b_pixels
+            .cmp(&a_pixels)
+            // Then by refresh rate (descending)
+            .then(
+                b.refresh_rate
+                    .partial_cmp(&a.refresh_rate)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+
+    for (i, mode) in modes.iter().enumerate() {
+        let current_marker = if mode.is_current { "*" } else { " " };
+        let preferred_marker = if mode.is_preferred { "P" } else { " " };
+
+        println!(
+            "     {current_marker} {preferred_marker} {:2}. {}x{} @ {:.2}Hz",
+            i + 1,
+            mode.width,
+            mode.height,
+            mode.refresh_rate,
+        );
+
+        // Print scales if they exist and differ from 1.0
+        if !mode.supported_scales.is_empty()
+            && (mode.preferred_scale != 1.0 || mode.supported_scales.iter().any(|&s| s != 1.0))
+        {
+            print!("             Scales: {:.2}", mode.preferred_scale);
+
+            // Print other supported scales if they differ from preferred
+            let other_scales: Vec<_> = mode
+                .supported_scales
+                .iter()
+                .filter(|&&s| (s - mode.preferred_scale).abs() > 0.01)
+                .collect();
+
+            for scale in other_scales {
+                print!(", {:.2}", scale);
+            }
+            println!();
+        }
+    }
+}
+
+async fn display_status(current_state: &CurrentState, show_modes: bool) -> Result<()> {
     println!("=== Current Monitor Status ===");
 
     let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
@@ -211,11 +270,17 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
     println!("Internal Monitors: {}", internal_monitors.len());
     for (i, monitor) in internal_monitors.iter().enumerate() {
         print_monitor(i, monitor);
+        if show_modes {
+            print_modes(monitor);
+        }
     }
 
     println!("\nExternal Monitors: {}", external_monitors.len());
     for (i, monitor) in external_monitors.iter().enumerate() {
         print_monitor(i, monitor);
+        if show_modes {
+            print_modes(monitor);
+        }
     }
 
     println!(
@@ -259,7 +324,7 @@ impl DisplayRule {
 fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
     match command {
         DisplayCommand::Test(_) => unreachable!(),
-        DisplayCommand::Status => vec![],
+        DisplayCommand::Status { .. } => unreachable!(),
         DisplayCommand::External(pattern) => vec![DisplayRule {
             mode: DisplayMode::External,
             pattern: pattern.clone(),
@@ -445,8 +510,8 @@ async fn main() -> Result<()> {
 
     // Handle different commands
     match &args.command {
-        DisplayCommand::Status => {
-            display_status(&current_state).await?;
+        DisplayCommand::Status { modes } => {
+            display_status(&current_state, *modes).await?;
             return Ok(());
         }
         DisplayCommand::Test(pattern) => {
