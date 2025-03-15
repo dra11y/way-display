@@ -76,7 +76,7 @@ enum DisplayCommand {
 
         /// Default mode if no patterns match
         #[arg(long, value_enum, default_value = "external")]
-        default: DefaultMode,
+        default: DisplayMode,
     },
 }
 
@@ -240,16 +240,8 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-enum DisplayMode {
-    External,
-    Internal,
-    Join,
-    Mirror,
-}
-
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum DefaultMode {
+enum DisplayMode {
     External,
     Internal,
     Join,
@@ -332,12 +324,7 @@ fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
 
             // Add the default rule (always matches)
             rules.push(DisplayRule {
-                mode: match default {
-                    DefaultMode::External => DisplayMode::External,
-                    DefaultMode::Internal => DisplayMode::Internal,
-                    DefaultMode::Join => DisplayMode::Join,
-                    DefaultMode::Mirror => DisplayMode::Mirror,
-                },
+                mode: *default,
                 pattern: MonitorPattern::default(),
             });
 
