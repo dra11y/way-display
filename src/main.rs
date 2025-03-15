@@ -11,10 +11,12 @@ use zbus::{Connection, zvariant::OwnedValue};
 
 use structs::{CurrentState, Monitor};
 
+const WATCHING: &str = "\nWatching for monitor configuration changes... (Press Ctrl+C to exit)\n";
+
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Watch for monitor configuration changes
+    /// Watch for monitor configuration changes and re-apply the command
     #[arg(short, long)]
     watch: bool,
 
@@ -22,7 +24,7 @@ struct Args {
     command: Command,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Subcommand, Clone)]
 enum Command {
     /// Use only the external monitor if connected
     External,
@@ -93,8 +95,34 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
     Ok(())
 }
 
-async fn watch_monitor_changes(
+async fn execute_command(
     connection: &Connection,
+    command: &Command,
+    current_state: &CurrentState,
+) -> Result<()> {
+    match command {
+        Command::Status => {
+            display_status(current_state).await?;
+        }
+        Command::Internal => {
+            println!("Switching to internal monitor...");
+            enable_monitors(connection, current_state, true, false).await?;
+        }
+        Command::External => {
+            println!("Switching to external monitor...");
+            enable_monitors(connection, current_state, false, true).await?;
+        }
+        Command::Both => {
+            println!("Enabling both internal and external monitors...");
+            enable_monitors(connection, current_state, true, true).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn watch_and_execute(
+    connection: &Connection,
+    command: Command,
     current_state: &CurrentState,
 ) -> Result<()> {
     let proxy = DisplayConfigProxy::new(connection).await?;
@@ -102,7 +130,7 @@ async fn watch_monitor_changes(
     // Create a stream to receive the MonitorsChanged signal
     let mut stream = proxy.receive_monitors_changed().await?;
 
-    println!("Watching for monitor configuration changes. Press Ctrl+C to exit.");
+    println!("{WATCHING}");
 
     let mut monitors = current_state.monitors.clone();
 
@@ -118,9 +146,11 @@ async fn watch_monitor_changes(
         monitors = current_state.monitors.clone();
 
         println!("Monitor configuration changed!");
-        display_status(&current_state).await?;
 
-        println!("\nContinuing to watch for changes... (Press Ctrl+C to exit)");
+        // Re-execute the command with the new state
+        execute_command(connection, &command, &current_state).await?;
+
+        println!("{WATCHING}");
     }
 
     Ok(())
@@ -140,28 +170,12 @@ async fn main() -> Result<()> {
     // Get current state
     let current_state: CurrentState = proxy.get_current_state().await?.into();
 
-    // Execute command
-    match args.command {
-        Command::Status => {
-            display_status(&current_state).await?;
-        }
-        Command::Internal => {
-            println!("Switching to internal monitor...");
-            enable_monitors(&connection, &current_state, true, false).await?;
-        }
-        Command::External => {
-            println!("Switching to external monitor...");
-            enable_monitors(&connection, &current_state, false, true).await?;
-        }
-        Command::Both => {
-            println!("Enabling both internal and external monitors...");
-            enable_monitors(&connection, &current_state, true, true).await?;
-        }
-    }
+    // Execute command once initially
+    execute_command(&connection, &args.command, &current_state).await?;
 
-    // If --watch flag is enabled, start watching for monitor changes
+    // If --watch flag is enabled, start watching for monitor changes and re-execute command
     if args.watch {
-        watch_monitor_changes(&connection, &current_state).await?;
+        watch_and_execute(&connection, args.command.clone(), &current_state).await?;
     }
 
     Ok(())
