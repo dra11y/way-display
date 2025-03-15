@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use anyhow::{Context as AnyhowContext, Result};
 use clap::{Parser, Subcommand};
 use display_config::DisplayConfigProxy;
+use futures::StreamExt as _;
 use zbus::{Connection, zvariant::OwnedValue};
 
 use structs::{CurrentState, Monitor};
@@ -13,6 +14,10 @@ use structs::{CurrentState, Monitor};
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Watch for monitor configuration changes
+    #[arg(short, long)]
+    watch: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -88,6 +93,39 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
     Ok(())
 }
 
+async fn watch_monitor_changes(
+    connection: &Connection,
+    current_state: &CurrentState,
+) -> Result<()> {
+    let proxy = DisplayConfigProxy::new(connection).await?;
+
+    // Create a stream to receive the MonitorsChanged signal
+    let mut stream = proxy.receive_monitors_changed().await?;
+
+    println!("Watching for monitor configuration changes. Press Ctrl+C to exit.");
+
+    let mut monitors = current_state.monitors.clone();
+
+    // Poll for signal events
+    while (stream.next().await).is_some() {
+        // Get the updated state
+        let current_state: CurrentState = proxy.get_current_state().await?.into();
+
+        if current_state.monitors == monitors {
+            continue;
+        }
+
+        monitors = current_state.monitors.clone();
+
+        println!("Monitor configuration changed!");
+        display_status(&current_state).await?;
+
+        println!("\nContinuing to watch for changes... (Press Ctrl+C to exit)");
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -119,6 +157,11 @@ async fn main() -> Result<()> {
             println!("Enabling both internal and external monitors...");
             enable_monitors(&connection, &current_state, true, true).await?;
         }
+    }
+
+    // If --watch flag is enabled, start watching for monitor changes
+    if args.watch {
+        watch_monitor_changes(&connection, &current_state).await?;
     }
 
     Ok(())

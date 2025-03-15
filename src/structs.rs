@@ -5,7 +5,7 @@ use zbus::zvariant::{OwnedValue, Value};
 // ApplyConfiguration is deprecated; use ApplyMonitorsConfig
 // https://browse.dgit.debian.org/mutter.git/plain/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Monitor {
     pub is_builtin: bool,
     pub is_underscanning: bool,
@@ -86,7 +86,7 @@ impl From<MonitorTuple> for Monitor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConnectorInfo {
     pub connector: String,
     pub vendor: String,
@@ -108,7 +108,7 @@ impl From<ConnectorInfoTuple> for ConnectorInfo {
 }
 
 // GetCurrentState structures
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mode {
     pub id: String,
     pub width: i32,
