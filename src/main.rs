@@ -506,8 +506,8 @@ async fn enable_monitors(
     // Select which monitors to use
     let monitors_to_use: Vec<_> = match (use_internal, use_external) {
         (true, true) => current_state.monitors.iter().collect(),
-        (true, false) => internal_monitors.clone(),
-        (false, true) => external_monitors.clone(),
+        (true, false) => internal_monitors.clone(), // Clone to avoid move
+        (false, true) => external_monitors.clone(), // Clone to avoid move
         (false, false) => {
             println!("No monitors selected to use.");
             return Ok(());
@@ -525,60 +525,52 @@ async fn enable_monitors(
     if mirror_mode && monitors_to_use.len() > 1 {
         // For mirror mode, create a single logical monitor with all physical monitors
 
-        // Find a reference monitor - try to use external monitors' mode as reference if available
+        // Find a reference monitor - prefer external monitors as they typically have better resolution
         let reference_monitor = if !external_monitors.is_empty() {
             external_monitors[0]
         } else {
             monitors_to_use[0]
         };
 
-        // Find modes that all monitors support (same resolution)
-        // First, collect all the resolutions from the reference monitor
-        let reference_resolutions: Vec<(i32, i32)> = reference_monitor
-            .modes
-            .iter()
-            .map(|m| (m.width, m.height))
-            .collect();
+        // Collect all resolutions that every monitor supports
+        let mut common_resolutions: Vec<(i32, i32)> = Vec::new();
 
-        // Find a resolution that all monitors support
-        let mut compatible_resolution = None;
+        // Start with all resolutions from the reference monitor
+        for mode in &reference_monitor.modes {
+            let resolution = (mode.width, mode.height);
 
-        // Start with trying to find the best preferred resolution
-        for &(width, height) in &reference_resolutions {
-            let all_monitors_support = monitors_to_use.iter().all(|monitor| {
+            // Check if all monitors support this resolution
+            let all_support = monitors_to_use.iter().all(|monitor| {
                 monitor
                     .modes
                     .iter()
-                    .any(|m| m.width == width && m.height == height)
+                    .any(|m| m.width == resolution.0 && m.height == resolution.1)
             });
 
-            if all_monitors_support {
-                compatible_resolution = Some((width, height));
-
-                // If this is a preferred resolution, prioritize it
-                let is_preferred = reference_monitor
-                    .modes
-                    .iter()
-                    .any(|m| m.width == width && m.height == height && m.is_preferred);
-
-                if is_preferred {
-                    break;
-                }
+            if all_support {
+                common_resolutions.push(resolution);
             }
         }
 
-        // If no compatible resolution found, we can't mirror
-        let (common_width, common_height) = match compatible_resolution {
-            Some(res) => res,
-            None => {
-                println!("Error: Could not find a common resolution for all monitors to mirror.");
-                println!("Try using 'join' mode instead, or configure only certain monitors.");
-                return Ok(());
-            }
-        };
+        // Sort resolutions by total pixels (highest resolution first)
+        common_resolutions.sort_by(|a, b| {
+            let a_pixels = a.0 * a.1;
+            let b_pixels = b.0 * b.1;
+            b_pixels.cmp(&a_pixels) // Descending order
+        });
+
+        // If no common resolutions found, we can't mirror
+        if common_resolutions.is_empty() {
+            println!("Error: Could not find a common resolution for all monitors to mirror.");
+            println!("Try using 'join' mode instead, or configure only certain monitors.");
+            return Ok(());
+        }
+
+        // Use the highest resolution that all monitors support
+        let (common_width, common_height) = common_resolutions[0];
 
         println!(
-            "Using common resolution for mirroring: {}x{}",
+            "Using highest common resolution for mirroring: {}x{}",
             common_width, common_height
         );
 
@@ -587,10 +579,17 @@ async fn enable_monitors(
             .iter()
             .map(|monitor| {
                 // Find the mode with matching resolution
+                // If multiple modes with same resolution exist (different refresh rates),
+                // prefer the one with highest refresh rate
                 let mode = monitor
                     .modes
                     .iter()
-                    .find(|m| m.width == common_width && m.height == common_height)
+                    .filter(|m| m.width == common_width && m.height == common_height)
+                    .max_by(|a, b| {
+                        a.refresh_rate
+                            .partial_cmp(&b.refresh_rate)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .expect("Monitor should have the common resolution mode");
 
                 (
@@ -601,12 +600,18 @@ async fn enable_monitors(
             })
             .collect();
 
-        // Get the scale from reference monitor's mode with this resolution
+        // Get the scale from reference monitor's mode with this resolution - prefer 1.0 scale if possible
         let reference_scale = reference_monitor
             .modes
             .iter()
             .find(|m| m.width == common_width && m.height == common_height)
-            .map(|m| m.preferred_scale)
+            .map(|m| {
+                if m.preferred_scale > 1.0 {
+                    m.preferred_scale
+                } else {
+                    1.0
+                }
+            })
             .unwrap_or(1.0);
 
         // Create a single logical monitor for all physical monitors
