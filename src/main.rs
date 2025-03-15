@@ -10,7 +10,7 @@ use display_config::DisplayConfigProxy;
 use futures::StreamExt as _;
 use zbus::{Connection, zvariant::OwnedValue};
 
-use structs::{CurrentState, Monitor};
+use structs::{ConnectorInfo, CurrentState, Monitor};
 
 const WATCHING: &str = "\nWatching for monitor configuration changes... (Press Ctrl+C to exit)\n";
 
@@ -49,6 +49,7 @@ enum DisplayCommand {
     Mirror(MonitorPattern),
 
     /// Test pattern matching against current monitors
+    #[command(arg_required_else_help = true)]
     Test(MonitorPattern),
 
     /// Run multiple rules in sequence (first match wins)
@@ -82,23 +83,23 @@ enum DisplayCommand {
 
 #[derive(Debug, Args, Clone, Default)]
 struct MonitorPattern {
-    /// Match by connector name (e.g., DP-6, HDMI-1)
+    /// Exact match by connector name (e.g., DP-6, HDMI-1)
     #[arg(long)]
     connector: Option<String>,
 
-    /// Match by vendor name (e.g., ACR, DEL)
+    /// Exact match by vendor code (e.g., ACR, DEL)
     #[arg(long)]
     vendor: Option<String>,
 
-    /// Match by product name (e.g., ET430K)
+    /// Partial or exact match by product name (e.g., "ET430K" or "Acer ET430K")
     #[arg(long)]
     product: Option<String>,
 
-    /// Match by serial number
+    /// Partial or exact match by serial number (e.g., "0x714" or "0x7140025c")
     #[arg(long)]
     serial: Option<String>,
 
-    /// Match by display name (e.g., "Acer Technologies 42\"")
+    /// Partial or exact match by display name (e.g., "Acer" or "Acer Technologies 42")
     #[arg(long)]
     name: Option<String>,
 }
@@ -121,10 +122,10 @@ impl MonitorPattern {
         // Check each specified pattern - all must match
         (match &self.connector {
             None => true,
-            Some(pattern) => monitor.connector_info.connector.contains(pattern),
+            Some(pattern) => monitor.connector_info.connector == *pattern,
         }) && (match &self.vendor {
             None => true,
-            Some(pattern) => monitor.connector_info.vendor.contains(pattern),
+            Some(pattern) => monitor.connector_info.vendor == *pattern,
         }) && (match &self.product {
             None => true,
             Some(pattern) => monitor.connector_info.product.contains(pattern),
@@ -179,6 +180,28 @@ impl MonitorPattern {
     }
 }
 
+fn print_connector_info(i: Option<usize>, connector_info: &ConnectorInfo) {
+    let (line_0, line_n) = match i {
+        Some(i) => (format!("{}. ", i + 1), "   "),
+        None => ("".to_string(), ""),
+    };
+    println!("     {line_0}Connector: {}", connector_info.connector);
+    println!("     {line_n}Vendor: {}", connector_info.vendor);
+    println!("     {line_n}Product: {}", connector_info.product);
+    println!("     {line_n}Serial: {}", connector_info.serial);
+}
+
+fn print_monitor(i: usize, monitor: &Monitor) {
+    println!("  {}. {}", i + 1, monitor.display_name);
+    print_connector_info(None, &monitor.connector_info);
+    if let Some(mode) = monitor.modes.iter().find(|m| m.is_current) {
+        println!(
+            "     Current Mode: {}x{} @ {:.2}Hz",
+            mode.width, mode.height, mode.refresh_rate
+        );
+    }
+}
+
 async fn display_status(current_state: &CurrentState) -> Result<()> {
     println!("=== Current Monitor Status ===");
 
@@ -187,36 +210,12 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
 
     println!("Internal Monitors: {}", internal_monitors.len());
     for (i, monitor) in internal_monitors.iter().enumerate() {
-        println!("  {}. {}", i + 1, monitor.display_name);
-        println!("     Connector: {}", monitor.connector_info.connector);
-        println!(
-            "     Vendor/Product: {}/{}",
-            monitor.connector_info.vendor, monitor.connector_info.product
-        );
-        println!("     Serial: {}", monitor.connector_info.serial);
-        if let Some(mode) = monitor.modes.iter().find(|m| m.is_current) {
-            println!(
-                "     Current Mode: {}x{} @ {:.2}Hz",
-                mode.width, mode.height, mode.refresh_rate
-            );
-        }
+        print_monitor(i, monitor);
     }
 
     println!("\nExternal Monitors: {}", external_monitors.len());
     for (i, monitor) in external_monitors.iter().enumerate() {
-        println!("  {}. {}", i + 1, monitor.display_name);
-        println!("     Connector: {}", monitor.connector_info.connector);
-        println!(
-            "     Vendor/Product: {}/{}",
-            monitor.connector_info.vendor, monitor.connector_info.product
-        );
-        println!("     Serial: {}", monitor.connector_info.serial);
-        if let Some(mode) = monitor.modes.iter().find(|m| m.is_current) {
-            println!(
-                "     Current Mode: {}x{} @ {:.2}Hz",
-                mode.width, mode.height, mode.refresh_rate
-            );
-        }
+        print_monitor(i, monitor);
     }
 
     println!(
@@ -224,16 +223,13 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
         current_state.logical_monitors.len()
     );
     for (i, logical) in current_state.logical_monitors.iter().enumerate() {
-        println!(
-            "  {}. Position: ({}, {}), Scale: {}",
-            i + 1,
-            logical.x,
-            logical.y,
-            logical.scale
-        );
+        println!("  {}. Position: ({}, {})", i + 1, logical.x, logical.y,);
+        println!("     Scale: {}", logical.scale);
         println!("     Primary: {}", logical.primary);
-        for monitor in &logical.assigned_monitors {
-            println!("     Connected: {}", monitor.connector);
+        println!("     Transform: {}", logical.transform);
+        println!("     Assigned Monitors:");
+        for (i, connector_info) in logical.assigned_monitors.iter().enumerate() {
+            print_connector_info(Some(i), connector_info);
         }
     }
 
@@ -722,10 +718,6 @@ async fn test_pattern_matching(
         println!("  Display Name: {}", name);
     }
 
-    if pattern.is_empty() {
-        println!("\nPattern is empty - will match ALL monitors");
-    }
-
     println!("\nResults:");
 
     let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
@@ -736,15 +728,29 @@ async fn test_pattern_matching(
     if internal_monitors.is_empty() {
         println!("  None found");
     } else {
-        for (i, monitor) in internal_monitors.iter().enumerate() {
-            let matches = pattern.matches(monitor);
-            println!(
-                "  {}. {} ({}): {}",
-                i + 1,
-                monitor.display_name,
-                monitor.connector_info.connector,
-                if matches { "MATCH" } else { "no match" }
-            );
+        let matching_internal: Vec<_> = internal_monitors
+            .iter()
+            .filter(|m| pattern.matches(m))
+            .collect();
+
+        if matching_internal.is_empty() {
+            println!("  All {} filtered out", internal_monitors.len());
+        } else {
+            for (i, monitor) in matching_internal.iter().enumerate() {
+                println!(
+                    "  {}. {} ({})",
+                    i + 1,
+                    monitor.display_name,
+                    monitor.connector_info.connector
+                );
+            }
+
+            let filtered_count = internal_monitors.len() - matching_internal.len();
+            if filtered_count > 0 {
+                println!("  {} filtered out", filtered_count);
+            } else {
+                println!("  None filtered out");
+            }
         }
     }
 
@@ -753,15 +759,29 @@ async fn test_pattern_matching(
     if external_monitors.is_empty() {
         println!("  None found");
     } else {
-        for (i, monitor) in external_monitors.iter().enumerate() {
-            let matches = pattern.matches(monitor);
-            println!(
-                "  {}. {} ({}): {}",
-                i + 1,
-                monitor.display_name,
-                monitor.connector_info.connector,
-                if matches { "MATCH" } else { "no match" }
-            );
+        let matching_external: Vec<_> = external_monitors
+            .iter()
+            .filter(|m| pattern.matches(m))
+            .collect();
+
+        if matching_external.is_empty() {
+            println!("  All {} filtered out", external_monitors.len());
+        } else {
+            for (i, monitor) in matching_external.iter().enumerate() {
+                println!(
+                    "  {}. {} ({})",
+                    i + 1,
+                    monitor.display_name,
+                    monitor.connector_info.connector
+                );
+            }
+
+            let filtered_count = external_monitors.len() - matching_external.len();
+            if filtered_count > 0 {
+                println!("  {} filtered out", filtered_count);
+            } else {
+                println!("  None filtered out");
+            }
         }
     }
 
