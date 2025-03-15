@@ -14,7 +14,7 @@ use structs::{CurrentState, Monitor};
 
 const WATCHING: &str = "\nWatching for monitor configuration changes... (Press Ctrl+C to exit)\n";
 
-/// A tool to manage monitor configurations in Wayland environments
+/// Manage display (monitor) selection in Wayland environments.
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None, arg_required_else_help = true)]
 struct CliArgs {
