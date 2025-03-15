@@ -42,8 +42,11 @@ enum DisplayCommand {
     /// Use only the internal monitor
     Internal(MonitorPattern),
 
-    /// Enable both internal and external monitors
-    Both(MonitorPattern),
+    /// Enable internal and external monitors side by side
+    Join(MonitorPattern),
+
+    /// Mirror internal and external monitors
+    Mirror(MonitorPattern),
 
     /// Run multiple rules in sequence (first match wins)
     #[command(alias = "rules")]
@@ -60,21 +63,18 @@ enum DisplayCommand {
         #[arg(long, value_name = "PATTERN")]
         internal: Vec<String>,
 
-        /// Use both displays when pattern matches
+        /// Use join displays when pattern matches
         #[arg(long, value_name = "PATTERN")]
-        both: Vec<String>,
+        join: Vec<String>,
+
+        /// Use mirrored displays when pattern matches
+        #[arg(long, value_name = "PATTERN")]
+        mirror: Vec<String>,
 
         /// Default mode if no patterns match
         #[arg(long, value_enum, default_value = "external")]
         default: DefaultMode,
     },
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum DefaultMode {
-    External,
-    Internal,
-    Both,
 }
 
 #[derive(Debug, Args, Clone, Default)]
@@ -241,7 +241,16 @@ async fn display_status(current_state: &CurrentState) -> Result<()> {
 enum DisplayMode {
     External,
     Internal,
-    Both,
+    Join,
+    Mirror,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum DefaultMode {
+    External,
+    Internal,
+    Join,
+    Mirror,
 }
 
 #[derive(Debug, Clone)]
@@ -267,28 +276,41 @@ fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
             mode: DisplayMode::Internal,
             pattern: pattern.clone(),
         }],
-        DisplayCommand::Both(pattern) => vec![DisplayRule {
-            mode: DisplayMode::Both,
+        DisplayCommand::Join(pattern) => vec![DisplayRule {
+            mode: DisplayMode::Join,
+            pattern: pattern.clone(),
+        }],
+        DisplayCommand::Mirror(pattern) => vec![DisplayRule {
+            mode: DisplayMode::Mirror,
             pattern: pattern.clone(),
         }],
         DisplayCommand::Auto {
             external,
             internal,
-            both,
+            join,
+            mirror,
             default,
             ..
         } => {
             let mut rules = Vec::new();
 
-            // Add all the both rules first
-            for pattern_str in both {
+            // Add mirror rules
+            for pattern_str in mirror {
                 rules.push(DisplayRule {
-                    mode: DisplayMode::Both,
+                    mode: DisplayMode::Mirror,
                     pattern: MonitorPattern::from_string(pattern_str),
                 });
             }
 
-            // Add all the external rules
+            // Add join rules
+            for pattern_str in join {
+                rules.push(DisplayRule {
+                    mode: DisplayMode::Join,
+                    pattern: MonitorPattern::from_string(pattern_str),
+                });
+            }
+
+            // Add external rules
             for pattern_str in external {
                 rules.push(DisplayRule {
                     mode: DisplayMode::External,
@@ -296,7 +318,7 @@ fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
                 });
             }
 
-            // Add all the internal rules
+            // Add internal rules
             for pattern_str in internal {
                 rules.push(DisplayRule {
                     mode: DisplayMode::Internal,
@@ -309,7 +331,8 @@ fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
                 mode: match default {
                     DefaultMode::External => DisplayMode::External,
                     DefaultMode::Internal => DisplayMode::Internal,
-                    DefaultMode::Both => DisplayMode::Both,
+                    DefaultMode::Join => DisplayMode::Join,
+                    DefaultMode::Mirror => DisplayMode::Mirror,
                 },
                 pattern: MonitorPattern::default(),
             });
@@ -360,15 +383,19 @@ async fn execute_mode(
     match mode {
         DisplayMode::Internal => {
             println!("Switching to internal monitor...");
-            enable_monitors(connection, current_state, true, false).await?;
+            enable_monitors(connection, current_state, true, false, false).await?;
         }
         DisplayMode::External => {
             println!("Switching to external monitor...");
-            enable_monitors(connection, current_state, false, true).await?;
+            enable_monitors(connection, current_state, false, true, false).await?;
         }
-        DisplayMode::Both => {
-            println!("Enabling both internal and external monitors...");
-            enable_monitors(connection, current_state, true, true).await?;
+        DisplayMode::Join => {
+            println!("Joining internal and external monitors...");
+            enable_monitors(connection, current_state, true, true, false).await?;
+        }
+        DisplayMode::Mirror => {
+            println!("Mirroring internal and external monitors...");
+            enable_monitors(connection, current_state, true, true, true).await?;
         }
     }
     Ok(())
@@ -460,6 +487,7 @@ async fn enable_monitors(
     current_state: &CurrentState,
     use_internal: bool,
     use_external: bool,
+    mirror_mode: bool,
 ) -> Result<()> {
     // Partition monitors into internal and external
     let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
@@ -478,8 +506,8 @@ async fn enable_monitors(
     // Select which monitors to use
     let monitors_to_use: Vec<_> = match (use_internal, use_external) {
         (true, true) => current_state.monitors.iter().collect(),
-        (true, false) => internal_monitors,
-        (false, true) => external_monitors,
+        (true, false) => internal_monitors.clone(), // Clone to avoid move
+        (false, true) => external_monitors.clone(), // Clone to avoid move
         (false, false) => {
             println!("No monitors selected to use.");
             return Ok(());
@@ -491,43 +519,95 @@ async fn enable_monitors(
         return Ok(());
     }
 
-    // Generate logical monitor configurations (side by side)
+    // Generate logical monitor configurations
     let mut configs = Vec::new();
-    let mut current_x = 0;
 
-    for (i, monitor) in monitors_to_use.iter().enumerate() {
-        // Find best mode for monitor
-        if let Some(mode) = monitor
+    if mirror_mode && monitors_to_use.len() > 1 {
+        // For mirror mode, create a single logical monitor with all physical monitors
+
+        // Find a reference mode - try to use internal monitors' mode as reference if available
+        let reference_monitor = if !internal_monitors.is_empty() {
+            internal_monitors[0]
+        } else {
+            monitors_to_use[0]
+        };
+
+        let reference_mode = reference_monitor
             .modes
             .iter()
             .find(|m| m.is_preferred)
-            .or_else(|| monitor.modes.first())
-        {
-            // Create monitor assignment tuple
-            let monitor_assignment = (
-                monitor.connector_info.connector.clone(), // connector
-                mode.id.clone(),                          // mode_id
-                HashMap::<String, OwnedValue>::new(),     // properties
-            );
+            .or_else(|| reference_monitor.modes.first())
+            .expect("No mode found for reference monitor");
 
-            // Calculate physical width considering the scale factor
-            let logical_width = (mode.width as f64 / mode.preferred_scale).round() as i32;
+        // Create monitor assignments for all monitors
+        let monitor_assignments: Vec<_> = monitors_to_use
+            .iter()
+            .map(|monitor| {
+                // Find an appropriate mode for this monitor
+                // For mirroring, we could ideally find a matching resolution
+                // but for simplicity, we'll use preferred modes for now
+                let mode = monitor
+                    .modes
+                    .iter()
+                    .find(|m| m.is_preferred)
+                    .or_else(|| monitor.modes.first())
+                    .expect("No mode found for monitor");
 
-            // Create logical monitor config
-            let logical_config = (
-                current_x,                // x
-                0,                        // y
-                mode.preferred_scale,     // scale
-                0u32,                     // transform (0 = normal)
-                i == 0,                   // primary (first monitor is primary)
-                vec![monitor_assignment], // monitors (without properties for logical monitor)
-            );
+                (
+                    monitor.connector_info.connector.clone(), // connector
+                    mode.id.clone(),                          // mode_id
+                    HashMap::<String, OwnedValue>::new(),     // properties
+                )
+            })
+            .collect();
 
-            // Add to configurations
-            configs.push(logical_config);
+        // Create a single logical monitor for all physical monitors
+        configs.push((
+            0,                              // x
+            0,                              // y
+            reference_mode.preferred_scale, // scale
+            0u32,                           // transform (0 = normal)
+            true,                           // primary
+            monitor_assignments,            // all monitors assigned to same logical monitor
+        ));
+    } else {
+        // For join mode (side by side), use previous logic with scaling fix
+        let mut current_x = 0;
 
-            // Update position for next monitor using logical width
-            current_x += logical_width;
+        for (i, monitor) in monitors_to_use.iter().enumerate() {
+            // Find best mode for monitor
+            if let Some(mode) = monitor
+                .modes
+                .iter()
+                .find(|m| m.is_preferred)
+                .or_else(|| monitor.modes.first())
+            {
+                // Create monitor assignment tuple
+                let monitor_assignment = (
+                    monitor.connector_info.connector.clone(), // connector
+                    mode.id.clone(),                          // mode_id
+                    HashMap::<String, OwnedValue>::new(),     // properties
+                );
+
+                // Calculate logical width considering the scale factor
+                let logical_width = (mode.width as f64 / mode.preferred_scale).round() as i32;
+
+                // Create logical monitor config
+                let logical_config = (
+                    current_x,                // x
+                    0,                        // y
+                    mode.preferred_scale,     // scale
+                    0u32,                     // transform (0 = normal)
+                    i == 0,                   // primary (first monitor is primary)
+                    vec![monitor_assignment], // monitors (without properties for logical monitor)
+                );
+
+                // Add to configurations
+                configs.push(logical_config);
+
+                // Update position for next monitor using logical width
+                current_x += logical_width;
+            }
         }
     }
 
