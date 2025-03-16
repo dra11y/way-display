@@ -1,6 +1,6 @@
 use anyhow::Result;
-use std::{collections::HashMap, ops::Deref};
-use zbus::zvariant::{OwnedValue, Str, Value};
+use std::collections::HashMap;
+use zbus::zvariant::OwnedValue;
 
 // ApplyConfiguration is deprecated; use ApplyMonitorsConfig
 // https://browse.dgit.debian.org/mutter.git/plain/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml
@@ -121,12 +121,6 @@ pub struct Mode {
     pub properties: HashMap<String, OwnedValue>,
 }
 
-impl Mode {
-    pub fn is_preferred(self: &&Self) -> bool {
-        self.is_preferred
-    }
-}
-
 pub type ModeTuple = (
     String,
     i32,
@@ -218,32 +212,6 @@ pub struct ApplyLogicalMonitor {
     pub properties: HashMap<String, OwnedValue>,
 }
 
-pub type ApplyLogicalMonitorTuple<'a> = (
-    i32,
-    i32,
-    f64,
-    u32,
-    bool,
-    Vec<(String, String, HashMap<String, OwnedValue>)>,
-);
-
-impl<'a> From<&ApplyLogicalMonitor> for ApplyLogicalMonitorTuple<'a> {
-    fn from(value: &ApplyLogicalMonitor) -> Self {
-        (
-            value.x,
-            value.y,
-            value.scale,
-            value.transform,
-            value.primary,
-            value
-                .assigned_monitors
-                .iter()
-                .map(|m| (m.connector.clone(), m.mode_id.clone(), m.properties.clone()))
-                .collect(),
-        )
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct CurrentLogicalMonitor {
     pub x: i32,
@@ -252,30 +220,7 @@ pub struct CurrentLogicalMonitor {
     pub transform: u32,
     pub primary: bool,
     pub assigned_monitors: Vec<ConnectorInfo>,
-    pub properties: HashMap<String, OwnedValue>,
-}
-
-impl From<ApplyLogicalMonitor> for CurrentLogicalMonitor {
-    fn from(value: ApplyLogicalMonitor) -> Self {
-        Self {
-            x: value.x,
-            y: value.y,
-            scale: value.scale,
-            transform: value.transform,
-            primary: value.primary,
-            assigned_monitors: value
-                .assigned_monitors
-                .iter()
-                .map(|m| ConnectorInfo {
-                    connector: m.connector.clone(),
-                    vendor: String::new(),
-                    product: String::new(),
-                    serial: String::new(),
-                })
-                .collect(),
-            properties: value.properties,
-        }
-    }
+    // pub properties: HashMap<String, OwnedValue>,
 }
 
 pub type CurrentLogicalMonitorTuple = (
@@ -297,18 +242,9 @@ impl From<CurrentLogicalMonitorTuple> for CurrentLogicalMonitor {
             transform: value.3,
             primary: value.4,
             assigned_monitors: value.5.into_iter().map(ConnectorInfo::from).collect(),
-            properties: value.6,
+            // properties: value.6,
         }
     }
-}
-
-// For ApplyMonitorsConfig
-#[derive(Debug, Clone)]
-pub struct ApplyMonitorsConfig {
-    pub serial: u32,
-    pub method: u32,
-    pub logical_monitors: Vec<CurrentLogicalMonitor>,
-    pub properties: HashMap<String, OwnedValue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -318,55 +254,6 @@ pub struct ApplyMonitorAssignment {
     pub properties: HashMap<String, OwnedValue>,
 }
 
-// impl<'a> From<&'a ApplyMonitorAssignment> for ApplyMonitorAssignmentTuple<'a> {
-//     fn from(assignment: &'a ApplyMonitorAssignment) -> Self {
-//         let properties = assignment
-//             .properties
-//             .iter()
-//             .map(|(k, v)| (k.as_str(), v.deref()))
-//             .collect();
-//         (
-//             assignment.connector.as_str(),
-//             assignment.mode_id.as_str(),
-//             properties,
-//         )
-//     }
-// }
-
-#[derive(Debug, Clone)]
-pub struct LogicalMonitorConfig {
-    pub x: i32,
-    pub y: i32,
-    pub scale: f64,
-    pub transform: u32,
-    pub primary: bool,
-    pub monitors: Vec<ApplyMonitorAssignment>,
-    pub properties: HashMap<String, OwnedValue>,
-}
-
-// pub type LogicalMonitorConfigTuple<'a> = (
-//     i32,
-//     i32,
-//     f64,
-//     u32,
-//     bool,
-//     Vec<ApplyMonitorAssignmentTuple<'a>>,
-// );
-
-// impl<'a> From<&'a LogicalMonitorConfig> for LogicalMonitorConfigTuple<'a> {
-//     fn from(config: &'a LogicalMonitorConfig) -> Self {
-//         let monitors = config.monitors.iter().map(|m| m.into()).collect();
-//         (
-//             config.x,
-//             config.y,
-//             config.scale,
-//             config.transform,
-//             config.primary,
-//             monitors,
-//         )
-//     }
-// }
-
 // Conversion from existing Monitor to MonitorAssignment
 impl From<(&Monitor, &Mode)> for ApplyMonitorAssignment {
     fn from((monitor, mode): (&Monitor, &Mode)) -> Self {
@@ -374,32 +261,6 @@ impl From<(&Monitor, &Mode)> for ApplyMonitorAssignment {
             connector: monitor.connector_info.connector.clone(),
             mode_id: mode.id.clone(),
             properties: monitor.properties.clone(),
-        }
-    }
-}
-
-// Conversion from existing LogicalMonitor to LogicalMonitorConfig
-impl From<&CurrentLogicalMonitor> for LogicalMonitorConfig {
-    fn from(logical: &CurrentLogicalMonitor) -> Self {
-        Self {
-            x: logical.x,
-            y: logical.y,
-            scale: logical.scale,
-            transform: logical.transform,
-            primary: logical.primary,
-            monitors: logical
-                .assigned_monitors
-                .iter()
-                .map(|connector| {
-                    // Need to find the corresponding monitor and current mode
-                    ApplyMonitorAssignment {
-                        connector: connector.connector.clone(),
-                        mode_id: "".to_string(), // Will need to populate this
-                        properties: HashMap::new(), // Will need to populate this
-                    }
-                })
-                .collect(),
-            properties: logical.properties.clone(),
         }
     }
 }

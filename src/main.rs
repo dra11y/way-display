@@ -1,8 +1,8 @@
-#![allow(unused)]
+#![deny(unused)]
 mod display_config_proxy;
 mod structs;
 
-use std::{collections::HashMap, ops::Deref};
+use std::collections::HashMap;
 
 use anyhow::{Context as AnyhowContext, Result};
 use clap::{Args, Parser, Subcommand};
@@ -10,10 +10,7 @@ use display_config_proxy::DisplayConfigProxy;
 use futures::StreamExt as _;
 use zbus::{Connection, zvariant::OwnedValue};
 
-use structs::{
-    ApplyLogicalMonitor, ApplyLogicalMonitorTuple, ApplyMonitorAssignment, ConnectorInfo,
-    CurrentLogicalMonitor, CurrentState, Monitor,
-};
+use structs::{ConnectorInfo, CurrentLogicalMonitor, CurrentState, Monitor};
 
 const WATCHING: &str = "\nWatching for monitor configuration changes... (Press Ctrl+C to exit)\n";
 
@@ -609,7 +606,7 @@ async fn enable_monitors(
     }
 
     // Generate logical monitor configurations
-    let mut logical_monitors: Vec<ApplyLogicalMonitor> = Vec::new();
+    let mut logical_monitors = Vec::new();
 
     if mirror_mode && monitors_to_use.len() > 1 {
         // For mirror mode, create a single logical monitor with all physical monitors
@@ -664,7 +661,7 @@ async fn enable_monitors(
         );
 
         // Create monitor assignments for all monitors with the same resolution
-        let assigned_monitors: Vec<ApplyMonitorAssignment> = monitors_to_use
+        let assigned_monitors = monitors_to_use
             .iter()
             .map(|monitor| {
                 // Find the mode with matching resolution
@@ -681,11 +678,11 @@ async fn enable_monitors(
                     })
                     .expect("Monitor should have the common resolution mode");
 
-                ApplyMonitorAssignment {
-                    connector: monitor.connector_info.connector.clone(),
-                    mode_id: mode.id.clone(),
-                    properties: monitor.properties.clone(),
-                }
+                (
+                    monitor.connector_info.connector.clone(), // connector
+                    mode.id.clone(),                          // mode_id
+                    HashMap::<String, OwnedValue>::new(),     // properties
+                )
             })
             .collect();
 
@@ -694,28 +691,19 @@ async fn enable_monitors(
             .modes
             .iter()
             .find(|m| m.width == common_width && m.height == common_height)
-            .map(|m| {
-                if m.preferred_scale > 1.0 {
-                    m.preferred_scale
-                } else {
-                    1.0
-                }
-            })
+            .map(|m| m.preferred_scale.max(1.0))
             .unwrap_or(1.0);
 
         // Create a single logical monitor for all physical monitors
 
-        let logical_monitor = ApplyLogicalMonitor {
-            x: 0,
-            y: 0,
-            scale,
-            transform: 0,
-            primary: true,
-            assigned_monitors,
-            properties: HashMap::new(),
-        };
-
-        logical_monitors.push(logical_monitor);
+        logical_monitors.push((
+            0,                 // x
+            0,                 // y
+            scale,             // scale
+            0u32,              // transform (0 = normal)
+            true,              // primary
+            assigned_monitors, // all monitors assigned to same logical monitor
+        ));
     } else {
         // For join mode (side by side), use previous logic with scaling fix
         let mut current_x = 0;
@@ -730,25 +718,24 @@ async fn enable_monitors(
             {
                 // Create monitor assignment tuple with the expected format
 
-                let monitor_assignment = ApplyMonitorAssignment {
-                    connector: monitor.connector_info.connector.clone(),
-                    mode_id: mode.id.clone(),
-                    properties: HashMap::new(),
-                };
+                let monitor_assignment = (
+                    monitor.connector_info.connector.clone(), // connector
+                    mode.id.clone(),                          // mode_id
+                    HashMap::<String, OwnedValue>::new(),     // properties
+                );
 
                 // Calculate logical width considering the scale factor
                 let logical_width = (mode.width as f64 / mode.preferred_scale).round() as i32;
                 // Create logical monitor config
 
-                let logical_monitor = ApplyLogicalMonitor {
-                    x: current_x,
-                    y: 0,
-                    scale: mode.preferred_scale,
-                    transform: 0u32,
-                    primary: i == 0,
-                    assigned_monitors: vec![monitor_assignment],
-                    properties: HashMap::new(),
-                };
+                let logical_monitor = (
+                    current_x,                // x
+                    0,                        // y
+                    mode.preferred_scale,     // scale
+                    0u32,                     // transform (0 = normal)
+                    i == 0,                   // primary (first monitor is primary)
+                    vec![monitor_assignment], // monitors (without properties for logical monitor)
+                );
 
                 // Add to configurations
 
@@ -767,28 +754,41 @@ async fn enable_monitors(
 
     if dry_run {
         println!("[DRY RUN] Would apply the following configuration:");
-        for (i, logical_monitor) in logical_monitors.iter().enumerate() {
-            print_logical_monitor(i, &logical_monitor.clone().into(), current_state);
-        }
+        // for (i, logical_monitor) in logical_monitors.iter().enumerate() {
+        //     print_logical_monitor(i, &logical_monitor.clone(), current_state);
+        // }
         println!("[DRY RUN] No changes were made");
         return Ok(());
     }
 
+    let method_name = "ApplyMonitorsConfig";
+    let path = "/org/gnome/Mutter/DisplayConfig";
+    let interface = "org.gnome.Mutter.DisplayConfig";
+
     let config_properties = HashMap::<String, OwnedValue>::new();
 
-    let proxy = DisplayConfigProxy::new(connection).await?;
+    // println!("logical_monitors\n{logical_monitors:#?}\n");
+    // println!("config_properties\n{config_properties:#?}\n");
 
-    #[rustfmt::skip]
-    proxy
-        .apply_monitors_config(
-            // serial
-            current_state.serial,
-            // method (0 = verify, 1 = temporary, 2 = persistent)
-            1u32,
-            &logical_monitors.iter().map(Into::into).collect::<Vec<_>>(),
-            HashMap::new(),
+    // Parameters for ApplyMonitorsConfig
+    let params = (
+        current_state.serial, // serial
+        1u32,                 // method (1 = temporary, 2 = persistent)
+        logical_monitors,     // logical monitor configs
+        config_properties,    // properties
+    );
+
+    let _result = connection
+        .call_method(
+            Some("org.gnome.Mutter.DisplayConfig"),
+            path,
+            Some(interface),
+            method_name,
+            &params,
         )
         .await?;
+
+    // println!("RESULT: \n{result:#?}");
 
     println!("Monitor configuration applied successfully!");
     Ok(())
