@@ -2,12 +2,13 @@
 mod display_config_proxy;
 mod structs;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
-use anyhow::{Context as AnyhowContext, Result};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use display_config_proxy::DisplayConfigProxy;
 use futures::StreamExt as _;
+use tokio::time::sleep;
 use zbus::{Connection, zvariant::OwnedValue};
 
 use structs::{ConnectorInfo, CurrentLogicalMonitor, CurrentState, Monitor};
@@ -903,9 +904,20 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
 
     // Connect to the session bus
-    let connection = Connection::session()
-        .await
-        .context("Failed to connect to session DBus")?;
+    let connection = loop {
+        println!("Connecting to DBus...");
+        match Connection::session().await {
+            Ok(connection) => break connection,
+            Err(error) => {
+                eprintln!("Failed to connect to session DBus: {error}");
+                if args.watch {
+                    sleep(Duration::from_secs(1)).await
+                } else {
+                    return Err(error.into());
+                }
+            }
+        }
+    };
 
     let proxy = DisplayConfigProxy::new(&connection).await?;
 

@@ -9,8 +9,5 @@ clap = { version = "4.5.32", features = [
     "derive",
 ] }
 futures = "0.3.31"
-tokio = { version = "1.44.1", features = [
-    "macros",
-    "rt-multi-thread",
-] }
+tokio = { version = "1.44.1", features = ["macros", "rt-multi-thread", "time"] }
 zbus = "5.5.0"
