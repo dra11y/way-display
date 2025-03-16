@@ -1,15 +1,23 @@
 #![deny(unused)]
 
 mod cli;
+
 mod current_state;
+pub use current_state::{CurrentState, CurrentStateTuple};
+
 mod monitor;
 pub use monitor::{Monitor, MonitorTuple};
+
+mod printable_monitor;
+
 mod property_map_ext;
-pub use current_state::{CurrentState, CurrentStateTuple};
 pub use property_map_ext::PropertyMapExt;
+
 mod display_config_proxy;
 pub use display_config_proxy::*;
+
 mod structs;
+pub use structs::*;
 
 use std::time::Duration;
 

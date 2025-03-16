@@ -7,6 +7,7 @@ use zbus::{Connection, zvariant::OwnedValue};
 use crate::{
     DisplayConfigProxy, Monitor,
     cli::{DisplayMode, DisplayRule},
+    printable_monitor::convert_for_printing,
     structs::{ApplyLogicalMonitorTuple, ConnectorInfo, CurrentLogicalMonitor},
 };
 
@@ -149,7 +150,8 @@ impl CurrentState {
         if dry_run {
             println!("[TEST MODE] The following configuration would have been applied:");
             for (i, logical) in logical_monitors.iter().enumerate() {
-                println!("Logical Monitor {i}:\n{logical:#?}");
+                let print_monitor = convert_for_printing(logical, &self.monitors);
+                print_monitor.print(i);
             }
             return Ok(());
         }
