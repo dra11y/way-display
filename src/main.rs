@@ -24,13 +24,15 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
 
     // Connect to the session bus
+    let mut attempts = 0;
     let connection = loop {
+        attempts += 1;
         println!("Connecting to DBus...");
         match Connection::session().await {
             Ok(connection) => break connection,
             Err(error) => {
                 eprintln!("Failed to connect to session DBus: {error}");
-                if args.watch {
+                if args.watch && attempts < 10 {
                     sleep(Duration::from_secs(1)).await
                 } else {
                     return Err(error.into());
@@ -53,10 +55,9 @@ async fn main() -> Result<()> {
     // Extract rules from command
     let rules = args.command.rules()?;
 
-    // Show dry run banner if test mode is enabled
     if args.test {
-        println!("=== Test Mode Enabled (Dry Run) ===");
-        println!("Changes will be previewed but not applied\n");
+        println!("=== TEST MODE ===");
+        println!("Changes will be previewed but not applied.\n");
     }
 
     // If watch flag is enabled

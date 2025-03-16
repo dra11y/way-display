@@ -147,11 +147,10 @@ impl CurrentState {
         }
 
         if dry_run {
-            println!("[DRY RUN] Would apply the following configuration:");
+            println!("[TEST MODE] The following configuration would have been applied:");
             for (i, logical) in logical_monitors.iter().enumerate() {
                 println!("Logical Monitor {i}:\n{logical:#?}");
             }
-            println!("[DRY RUN] No changes were made");
             return Ok(());
         }
 
@@ -160,9 +159,6 @@ impl CurrentState {
         let interface = "org.gnome.Mutter.DisplayConfig";
 
         let config_properties = HashMap::<String, OwnedValue>::new();
-
-        // println!("logical_monitors\n{logical_monitors:#?}\n");
-        // println!("config_properties\n{config_properties:#?}\n");
 
         // Parameters for ApplyMonitorsConfig
         let params = (
@@ -210,12 +206,6 @@ impl CurrentState {
         // Create a stream to receive the MonitorsChanged signal
         let mut stream = proxy.receive_monitors_changed().await?;
 
-        if dry_run {
-            println!("{}\n[DRY RUN] No actual changes will be made", WATCHING);
-        } else {
-            println!("{}", WATCHING);
-        }
-
         // Execute the selected mode
         if let Err(e) = self
             .determine_and_execute_mode(rules, connection, dry_run)
@@ -223,6 +213,8 @@ impl CurrentState {
         {
             println!("Failed to apply display configuration: {}", e);
         }
+
+        println!("{}", WATCHING);
 
         let mut monitors = self.monitors.clone();
 
