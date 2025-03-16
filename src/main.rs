@@ -394,7 +394,7 @@ fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
     }
 }
 
-fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Option<DisplayMode> {
+fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result<DisplayMode> {
     // Check each external monitor against the rules
     let external_monitors: Vec<_> = current_state
         .monitors
@@ -405,26 +405,68 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Option
     // Default to external if no rules provided and monitors are available
     if rules.is_empty() {
         if external_monitors.is_empty() {
-            return Some(DisplayMode::Internal);
+            return Ok(DisplayMode::Internal);
         } else {
-            return Some(DisplayMode::External);
+            return Ok(DisplayMode::External);
         }
     }
 
     // Go through rules in order (first match wins)
     for rule in rules {
-        // Check if any monitor matches the pattern
-        if rule.pattern.is_empty() || rule.matches_any_monitor(&external_monitors) {
-            return Some(rule.mode.clone());
+        // For non-empty patterns, ensure we have a matching monitor
+        if !rule.pattern.is_empty() {
+            // Check if any monitor matches the pattern
+            let has_match = rule.matches_any_monitor(&external_monitors);
+
+            if has_match {
+                return Ok(rule.mode);
+            }
+
+            // Continue to the next rule if no match
+            continue;
+        }
+
+        // For empty patterns (default rules), check if the mode is valid with current monitors
+        match rule.mode {
+            DisplayMode::External => {
+                if external_monitors.is_empty() {
+                    // Skip this rule - we can't use external mode without external monitors
+                    continue;
+                }
+                return Ok(DisplayMode::External);
+            }
+            DisplayMode::Internal => {
+                if current_state.monitors.iter().any(|m| m.is_builtin) {
+                    return Ok(DisplayMode::Internal);
+                }
+                // Skip if no internal monitor
+                continue;
+            }
+            DisplayMode::Join => {
+                if external_monitors.is_empty()
+                    || !current_state.monitors.iter().any(|m| m.is_builtin)
+                {
+                    // Need both internal and external for join mode
+                    continue;
+                }
+                return Ok(DisplayMode::Join);
+            }
+            DisplayMode::Mirror => {
+                if external_monitors.is_empty()
+                    || !current_state.monitors.iter().any(|m| m.is_builtin)
+                {
+                    // Need both internal and external for mirror mode
+                    continue;
+                }
+                return Ok(DisplayMode::Mirror);
+            }
         }
     }
 
-    // No rules matched - use internal if no external monitors, otherwise external
-    if external_monitors.is_empty() {
-        Some(DisplayMode::Internal)
-    } else {
-        Some(DisplayMode::External)
-    }
+    // No rules matched
+    Err(anyhow::anyhow!(
+        "No matching monitor configuration found for the specified rules"
+    ))
 }
 
 async fn execute_mode(
@@ -481,11 +523,15 @@ async fn watch_and_execute(
         println!("Monitor configuration changed!");
 
         // Determine which mode applies based on the connected monitors
-        if let Some(mode) = determine_mode(rules, &current_state) {
-            // Execute the selected mode
-            execute_mode(connection, &mode, &current_state).await?;
-        } else {
-            println!("No rules provided");
+        match determine_mode(rules, &current_state) {
+            Ok(mode) => {
+                // Execute the selected mode
+                execute_mode(connection, &mode, &current_state).await?;
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1); // Exit with error status
+            }
         }
 
         println!("{WATCHING}");
@@ -525,12 +571,15 @@ async fn main() -> Result<()> {
     let rules = get_rules_from_command(&args.command);
 
     // Determine which mode applies based on the connected monitors
-    if let Some(mode) = determine_mode(&rules, &current_state) {
-        // Execute the selected mode
-        execute_mode(&connection, &mode, &current_state).await?;
-    } else {
-        println!("No applicable rules found");
-        return Ok(());
+    match determine_mode(&rules, &current_state) {
+        Ok(mode) => {
+            // Execute the selected mode
+            execute_mode(&connection, &mode, &current_state).await?;
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1); // Exit with error status
+        }
     }
 
     // If --watch flag is enabled, start watching for monitor changes
