@@ -576,7 +576,7 @@ async fn watch_and_execute(
     let mut monitors = current_state.monitors.clone();
 
     // Poll for signal events
-    while (stream.next().await).is_some() {
+    while let Some(_) = stream.next().await {
         // Get the updated state
         let current_state: CurrentState = proxy.get_current_state().await?.into();
 
@@ -592,11 +592,12 @@ async fn watch_and_execute(
         match determine_mode(rules, &current_state) {
             Ok(mode) => {
                 // Execute the selected mode
-                execute_mode(connection, &mode, &current_state).await?;
+                if let Err(e) = execute_mode(connection, &mode, &current_state).await {
+                    println!("Failed to apply display configuration: {}", e);
+                }
             }
             Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1); // Exit with error status
+                println!("No display configuration applied: {}", e);
             }
         }
 
@@ -636,7 +637,23 @@ async fn main() -> Result<()> {
     // Extract rules from command
     let rules = get_rules_from_command(&args.command);
 
-    // Determine which mode applies based on the connected monitors
+    // If watch flag is enabled, don't exit on initial failure
+    if args.watch {
+        // Try initial configuration but don't exit on failure
+        if let Ok(mode) = determine_mode(&rules, &current_state) {
+            if let Err(e) = execute_mode(&connection, &mode, &current_state).await {
+                println!("Initial configuration failed: {}", e);
+            }
+        } else {
+            println!("Waiting for matching monitors to be connected...");
+        }
+
+        // Start watching for monitor changes
+        watch_and_execute(&connection, &rules, &current_state).await?;
+        return Ok(());
+    }
+
+    // For non-watch mode, determine mode and exit with error if no match
     match determine_mode(&rules, &current_state) {
         Ok(mode) => {
             // Execute the selected mode
@@ -646,11 +663,6 @@ async fn main() -> Result<()> {
             eprintln!("Error: {}", e);
             std::process::exit(1); // Exit with error status
         }
-    }
-
-    // If --watch flag is enabled, start watching for monitor changes
-    if args.watch {
-        watch_and_execute(&connection, &rules, &current_state).await?;
     }
 
     Ok(())
