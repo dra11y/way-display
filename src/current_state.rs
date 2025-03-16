@@ -105,6 +105,7 @@ impl CurrentState {
         &self,
         connection: &Connection,
         mode: &DisplayMode,
+        verify_attempts: usize,
         dry_run: bool,
     ) -> Result<()> {
         // Partition monitors into internal and external
@@ -171,22 +172,19 @@ impl CurrentState {
             config_properties,        // properties
         );
 
-        let _result = connection
-            .call_method(
-                Some("org.gnome.Mutter.DisplayConfig"),
-                path,
-                Some(interface),
-                method_name,
-                &params,
-            )
-            .await?;
-
         let proxy = DisplayConfigProxy::new(connection).await?;
 
         let mut attempts = 0;
         loop {
-            attempts += 1;
-            sleep(Duration::from_millis(100)).await;
+            let reply = connection
+                .call_method(
+                    Some("org.gnome.Mutter.DisplayConfig"),
+                    path,
+                    Some(interface),
+                    method_name,
+                    &params,
+                )
+                .await?;
             let updated_state: CurrentState = proxy.get_current_state().await?.into();
             let error = match updated_state.verify_applied_config(&logical_monitors) {
                 Ok(true) => {
@@ -194,11 +192,18 @@ impl CurrentState {
                     return Ok(());
                 }
                 Ok(false) => {
-                    "✗ Monitor configuration was attempted but failed verification.".to_string()
+                    format!(
+                        "✗ Monitor configuration was attempted but failed verification. Reply message: {reply:?}"
+                    )
                 }
-                Err(e) => format!("Error during verification of monitor config: {e}"),
+                Err(e) => format!(
+                    "Error during verification of monitor config: {e}. Reply message: {reply:?}"
+                ),
             };
-            if attempts > 10 {
+            sleep(Duration::from_secs(1)).await;
+            attempts += 1;
+            eprintln!("Attempt {attempts} failed.");
+            if attempts > verify_attempts {
                 return Err(anyhow!(error));
             }
         }
@@ -208,10 +213,12 @@ impl CurrentState {
         &self,
         rules: &[DisplayRule],
         connection: &Connection,
+        verify_attempts: usize,
         dry_run: bool,
     ) -> Result<()> {
         let mode = self.determine_mode(rules)?;
-        self.enable_monitors(connection, &mode, dry_run).await?;
+        self.enable_monitors(connection, &mode, verify_attempts, dry_run)
+            .await?;
         Ok(())
     }
 
@@ -228,7 +235,7 @@ impl CurrentState {
 
         // Execute the selected mode
         if let Err(e) = self
-            .determine_and_execute_mode(rules, connection, dry_run)
+            .determine_and_execute_mode(rules, connection, 999_999, dry_run)
             .await
         {
             println!("Failed to apply display configuration: {}", e);
@@ -253,7 +260,7 @@ impl CurrentState {
 
             // Execute the selected mode
             if let Err(e) = self
-                .determine_and_execute_mode(rules, connection, dry_run)
+                .determine_and_execute_mode(rules, connection, 999_999, dry_run)
                 .await
             {
                 println!("Failed to apply display configuration: {}", e);

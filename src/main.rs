@@ -35,11 +35,10 @@ async fn main() -> Result<()> {
     let mut attempts = 0;
     let connection = loop {
         attempts += 1;
-        println!("Connecting to DBus...");
         match Connection::session().await {
             Ok(connection) => break connection,
             Err(error) => {
-                eprintln!("Failed to connect to session DBus: {error}");
+                eprintln!("Failed to connect to session DBus (attempt {attempts}): {error}");
                 if args.watch && attempts < 10 {
                     sleep(Duration::from_secs(1)).await
                 } else {
@@ -79,7 +78,7 @@ async fn main() -> Result<()> {
 
     // Execute the selected mode
     current_state
-        .determine_and_execute_mode(&rules, &connection, args.test)
+        .determine_and_execute_mode(&rules, &connection, 10, args.test)
         .await?;
 
     Ok(())
