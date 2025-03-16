@@ -315,12 +315,6 @@ struct DisplayRule {
     pattern: MonitorPattern,
 }
 
-impl DisplayRule {
-    fn matches_any_monitor(&self, monitors: &[&Monitor]) -> bool {
-        monitors.iter().any(|monitor| self.pattern.matches(monitor))
-    }
-}
-
 fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
     match command {
         DisplayCommand::Test(_) => unreachable!(),
@@ -402,6 +396,12 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result
         .filter(|m| !m.is_builtin)
         .collect();
 
+    let internal_monitors: Vec<_> = current_state
+        .monitors
+        .iter()
+        .filter(|m| m.is_builtin)
+        .collect();
+
     // Default to external if no rules provided and monitors are available
     if rules.is_empty() {
         if external_monitors.is_empty() {
@@ -411,14 +411,84 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result
         }
     }
 
-    // Go through rules in order (first match wins)
+    // For single-rule commands with patterns (External, Internal, etc.), verify pattern matches
+    if rules.len() == 1 && !rules[0].pattern.is_empty() {
+        let rule = &rules[0];
+
+        // Check if we need to match against external or internal monitors based on the mode
+        let monitors_to_check = match rule.mode {
+            DisplayMode::External => &external_monitors,
+            DisplayMode::Internal => &internal_monitors,
+            // For modes requiring both types, check all monitors
+            _ => &current_state.monitors.iter().collect::<Vec<_>>(),
+        };
+
+        if monitors_to_check.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No monitors available for {} mode",
+                format!("{:?}", rule.mode)
+            ));
+        }
+
+        // Check if any monitor matches the pattern
+        let has_match = monitors_to_check
+            .iter()
+            .any(|monitor| rule.pattern.matches(monitor));
+
+        if !has_match {
+            return Err(anyhow::anyhow!(
+                "No monitors match the specified filter criteria"
+            ));
+        }
+
+        // For modes requiring both monitor types, make sure both exist
+        match rule.mode {
+            DisplayMode::Join | DisplayMode::Mirror => {
+                if external_monitors.is_empty() || internal_monitors.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "{:?} mode requires both internal and external monitors",
+                        rule.mode
+                    ));
+                }
+            }
+            _ => {}
+        }
+
+        return Ok(rule.mode);
+    }
+
+    // For multi-rule commands (Auto), go through rules in order
     for rule in rules {
         // For non-empty patterns, ensure we have a matching monitor
         if !rule.pattern.is_empty() {
-            // Check if any monitor matches the pattern
-            let has_match = rule.matches_any_monitor(&external_monitors);
+            // For modes requiring specific monitor types, check appropriate collection
+            let monitors_to_check = match rule.mode {
+                DisplayMode::External => &external_monitors,
+                DisplayMode::Internal => &internal_monitors,
+                _ => &current_state.monitors.iter().collect::<Vec<_>>(),
+            };
+
+            if monitors_to_check.is_empty() {
+                // Skip this rule - no monitors of required type available
+                continue;
+            }
+
+            let has_match = monitors_to_check
+                .iter()
+                .any(|monitor| rule.pattern.matches(monitor));
 
             if has_match {
+                // For modes requiring both monitor types, ensure both exist
+                match rule.mode {
+                    DisplayMode::Join | DisplayMode::Mirror => {
+                        if external_monitors.is_empty() || internal_monitors.is_empty() {
+                            // Skip this rule - can't use join/mirror without both types
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+
                 return Ok(rule.mode);
             }
 
@@ -436,25 +506,21 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result
                 return Ok(DisplayMode::External);
             }
             DisplayMode::Internal => {
-                if current_state.monitors.iter().any(|m| m.is_builtin) {
+                if !internal_monitors.is_empty() {
                     return Ok(DisplayMode::Internal);
                 }
                 // Skip if no internal monitor
                 continue;
             }
             DisplayMode::Join => {
-                if external_monitors.is_empty()
-                    || !current_state.monitors.iter().any(|m| m.is_builtin)
-                {
+                if external_monitors.is_empty() || internal_monitors.is_empty() {
                     // Need both internal and external for join mode
                     continue;
                 }
                 return Ok(DisplayMode::Join);
             }
             DisplayMode::Mirror => {
-                if external_monitors.is_empty()
-                    || !current_state.monitors.iter().any(|m| m.is_builtin)
-                {
+                if external_monitors.is_empty() || internal_monitors.is_empty() {
                     // Need both internal and external for mirror mode
                     continue;
                 }
