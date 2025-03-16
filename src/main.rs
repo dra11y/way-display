@@ -421,7 +421,6 @@ fn get_rules_from_command(command: &DisplayCommand) -> Vec<DisplayRule> {
         }
     }
 }
-
 fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result<DisplayMode> {
     // Check each external monitor against the rules
     let external_monitors: Vec<_> = current_state
@@ -445,8 +444,8 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result
         }
     }
 
-    // For single-rule commands with patterns (External, Internal, etc.), verify pattern matches
-    if rules.len() == 1 && !rules[0].pattern.is_empty() {
+    // For single-rule commands (External, Internal, etc.), handle appropriately
+    if rules.len() == 1 {
         let rule = &rules[0];
 
         // Check if we need to match against external or internal monitors based on the mode
@@ -464,15 +463,17 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result
             ));
         }
 
-        // Check if any monitor matches the pattern
-        let has_match = monitors_to_check
-            .iter()
-            .any(|monitor| rule.pattern.matches(monitor));
+        // If pattern is not empty, check if any monitor matches the pattern
+        if !rule.pattern.is_empty() {
+            let has_match = monitors_to_check
+                .iter()
+                .any(|monitor| rule.pattern.matches(monitor));
 
-        if !has_match {
-            return Err(anyhow::anyhow!(
-                "No monitors match the specified filter criteria"
-            ));
+            if !has_match {
+                return Err(anyhow::anyhow!(
+                    "No monitors match the specified filter criteria"
+                ));
+            }
         }
 
         // For modes requiring both monitor types, make sure both exist
