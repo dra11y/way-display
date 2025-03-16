@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Result, anyhow};
 use futures::StreamExt as _;
+use tokio::time::sleep;
 use zbus::{Connection, zvariant::OwnedValue};
 
 use crate::{
@@ -164,10 +165,10 @@ impl CurrentState {
 
         // Parameters for ApplyMonitorsConfig
         let params = (
-            self.serial,       // serial
-            1u32,              // method (1 = temporary, 2 = persistent)
-            logical_monitors,  // logical monitor configs
-            config_properties, // properties
+            self.serial,              // serial
+            1u32,                     // method (1 = temporary, 2 = persistent)
+            logical_monitors.clone(), // logical monitor configs
+            config_properties,        // properties
         );
 
         let _result = connection
@@ -180,10 +181,27 @@ impl CurrentState {
             )
             .await?;
 
-        // println!("RESULT: \n{result:#?}");
+        let proxy = DisplayConfigProxy::new(connection).await?;
 
-        println!("Monitor configuration applied successfully!");
-        Ok(())
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            sleep(Duration::from_millis(100)).await;
+            let updated_state: CurrentState = proxy.get_current_state().await?.into();
+            let error = match updated_state.verify_applied_config(&logical_monitors) {
+                Ok(true) => {
+                    println!("✓ Monitor configuration successfully applied.");
+                    return Ok(());
+                }
+                Ok(false) => {
+                    "✗ Monitor configuration was attempted but failed verification.".to_string()
+                }
+                Err(e) => format!("Error during verification of monitor config: {e}"),
+            };
+            if attempts > 10 {
+                return Err(anyhow!(error));
+            }
+        }
     }
 
     pub async fn determine_and_execute_mode(
@@ -383,6 +401,98 @@ impl CurrentState {
         Err(anyhow!(
             "No matching monitor configuration found for the specified rules"
         ))
+    }
+
+    /// Verify if the applied configuration matches what we intended to apply
+    pub fn verify_applied_config(
+        &self,
+        intended_logical_monitors: &[ApplyLogicalMonitorTuple],
+    ) -> Result<bool> {
+        // If count doesn't match, configuration definitely didn't apply correctly
+        if self.logical_monitors.len() != intended_logical_monitors.len() {
+            println!(
+                "Configuration mismatch: Expected {} logical monitors, but found {}",
+                intended_logical_monitors.len(),
+                self.logical_monitors.len()
+            );
+            return Ok(false);
+        }
+
+        // Check each logical monitor
+        for intended in intended_logical_monitors {
+            let (
+                intended_x,
+                intended_y,
+                intended_scale,
+                intended_transform,
+                intended_primary,
+                intended_monitors,
+            ) = intended;
+
+            // Try to find a matching logical monitor in the current configuration
+            let found_match = self.logical_monitors.iter().any(|current| {
+                // Check position, scale, transform, and primary status
+                if current.x != *intended_x
+                    || current.y != *intended_y
+                    || (current.scale - *intended_scale).abs() > 0.001
+                    || current.transform != *intended_transform
+                    || current.primary != *intended_primary
+                {
+                    return false;
+                }
+
+                // Check if the monitor count matches
+                if current.assigned_monitors.len() != intended_monitors.len() {
+                    return false;
+                }
+
+                // Check each connector in the logical monitor
+                for (connector, mode_id, _) in intended_monitors {
+                    // Find this connector in the current configuration
+                    let found_connector = current
+                        .assigned_monitors
+                        .iter()
+                        .any(|m| m.connector == *connector);
+
+                    if !found_connector {
+                        return false;
+                    }
+
+                    // Find the monitor and check if it's using the intended mode
+                    if let Some(monitor) = self
+                        .monitors
+                        .iter()
+                        .find(|m| m.connector_info.connector == *connector)
+                    {
+                        let using_intended_mode = monitor
+                            .modes
+                            .iter()
+                            .filter(|m| m.is_current)
+                            .any(|m| m.id == *mode_id);
+
+                        if !using_intended_mode {
+                            return false;
+                        }
+                    } else {
+                        // Monitor not found in current state
+                        return false;
+                    }
+                }
+
+                true
+            });
+
+            if !found_match {
+                println!(
+                    "Configuration mismatch: Could not find matching logical monitor for intended config at position ({}, {})",
+                    intended_x, intended_y
+                );
+                return Ok(false);
+            }
+        }
+
+        // All checks passed
+        Ok(true)
     }
 }
 
