@@ -19,7 +19,9 @@
 //!
 //! [Writing a client proxy]: https://dbus2.github.io/zbus/client.html
 //! [D-Bus standard interfaces]: https://dbus.freedesktop.org/doc/dbus-specification.html#standard-interfaces,
-use zbus::proxy;
+use zbus::{proxy, zvariant::OwnedValue};
+
+use crate::structs::ApplyLogicalMonitorTuple;
 #[proxy(
     interface = "org.gnome.Mutter.DisplayConfig",
     default_service = "org.gnome.Mutter.DisplayConfig",
@@ -53,19 +55,8 @@ pub trait DisplayConfig {
         &self,
         serial: u32,
         method: u32,
-        logical_monitors: &[&(
-            i32,
-            i32,
-            f64,
-            u32,
-            bool,
-            &[&(
-                &str,
-                &str,
-                std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
-            )],
-        )],
-        properties: std::collections::HashMap<&str, &zbus::zvariant::Value<'_>>,
+        logical_monitors: &[ApplyLogicalMonitorTuple<'_>],
+        properties: std::collections::HashMap<String, OwnedValue>,
     ) -> zbus::Result<()>;
 
     /// ChangeBacklight method

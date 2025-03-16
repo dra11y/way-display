@@ -1,15 +1,19 @@
-mod display_config;
+#![allow(unused)]
+mod display_config_proxy;
 mod structs;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use anyhow::{Context as AnyhowContext, Result};
 use clap::{Args, Parser, Subcommand};
-use display_config::DisplayConfigProxy;
+use display_config_proxy::DisplayConfigProxy;
 use futures::StreamExt as _;
 use zbus::{Connection, zvariant::OwnedValue};
 
-use structs::{ConnectorInfo, CurrentState, Monitor};
+use structs::{
+    ApplyLogicalMonitor, ApplyLogicalMonitorTuple, ApplyMonitorAssignment, ConnectorInfo,
+    CurrentLogicalMonitor, CurrentState, Monitor,
+};
 
 const WATCHING: &str = "\nWatching for monitor configuration changes... (Press Ctrl+C to exit)\n";
 
@@ -20,6 +24,10 @@ struct CliArgs {
     /// Watch for monitor configuration changes and apply rules based on connected monitors
     #[arg(short, long)]
     watch: bool,
+
+    /// Dry run mode: print what would be done without making changes
+    #[arg(short, long)]
+    test: bool,
 
     /// TODO: (Not yet implemented)
     /// Optional configuration file with display rules
@@ -184,20 +192,42 @@ impl MonitorPattern {
     }
 }
 
-fn print_connector_info(i: Option<usize>, connector_info: &ConnectorInfo) {
+fn print_connector_info(
+    i: Option<usize>,
+    connector_info: &ConnectorInfo,
+    current_state: &CurrentState,
+) {
     let (line_0, line_n) = match i {
         Some(i) => (format!("{}. ", i + 1), "   "),
         None => ("".to_string(), ""),
     };
     println!("     {line_0}Connector: {}", connector_info.connector);
+
+    // Find the monitor in current state
+    if let Some(monitor) = current_state
+        .monitors
+        .iter()
+        .find(|m| m.connector_info.connector == *connector_info.connector)
+    {
+        println!("         Display: {}", monitor.display_name);
+
+        // Find the mode info
+        if let Some(mode) = monitor.modes.iter().find(|m| m.is_current) {
+            println!(
+                "         Mode: {}x{} @ {:.2}Hz",
+                mode.width, mode.height, mode.refresh_rate
+            );
+        }
+    }
+
     println!("     {line_n}Vendor: {}", connector_info.vendor);
     println!("     {line_n}Product: {}", connector_info.product);
     println!("     {line_n}Serial: {}", connector_info.serial);
 }
 
-fn print_monitor(i: usize, monitor: &Monitor) {
+fn print_monitor(i: usize, monitor: &Monitor, current_state: &CurrentState) {
     println!("  {}. {}", i + 1, monitor.display_name);
-    print_connector_info(None, &monitor.connector_info);
+    print_connector_info(None, &monitor.connector_info, current_state);
     if let Some(mode) = monitor.modes.iter().find(|m| m.is_current) {
         println!(
             "     Current Mode: {}x{} @ {:.2}Hz",
@@ -261,6 +291,17 @@ fn print_modes(monitor: &Monitor) {
     }
 }
 
+fn print_logical_monitor(i: usize, logical: &CurrentLogicalMonitor, current_state: &CurrentState) {
+    println!("  {}. Position: ({}, {})", i + 1, logical.x, logical.y,);
+    println!("     Scale: {}", logical.scale);
+    println!("     Primary: {}", logical.primary);
+    println!("     Transform: {}", logical.transform);
+    println!("     Assigned Monitors:");
+    for (i, connector_info) in logical.assigned_monitors.iter().enumerate() {
+        print_connector_info(Some(i), connector_info, current_state);
+    }
+}
+
 async fn display_status(current_state: &CurrentState, show_modes: bool) -> Result<()> {
     println!("=== Current Monitor Status ===");
 
@@ -269,7 +310,7 @@ async fn display_status(current_state: &CurrentState, show_modes: bool) -> Resul
 
     println!("Internal Monitors: {}", internal_monitors.len());
     for (i, monitor) in internal_monitors.iter().enumerate() {
-        print_monitor(i, monitor);
+        print_monitor(i, monitor, current_state);
         if show_modes {
             print_modes(monitor);
         }
@@ -277,7 +318,7 @@ async fn display_status(current_state: &CurrentState, show_modes: bool) -> Resul
 
     println!("\nExternal Monitors: {}", external_monitors.len());
     for (i, monitor) in external_monitors.iter().enumerate() {
-        print_monitor(i, monitor);
+        print_monitor(i, monitor, current_state);
         if show_modes {
             print_modes(monitor);
         }
@@ -288,14 +329,7 @@ async fn display_status(current_state: &CurrentState, show_modes: bool) -> Resul
         current_state.logical_monitors.len()
     );
     for (i, logical) in current_state.logical_monitors.iter().enumerate() {
-        println!("  {}. Position: ({}, {})", i + 1, logical.x, logical.y,);
-        println!("     Scale: {}", logical.scale);
-        println!("     Primary: {}", logical.primary);
-        println!("     Transform: {}", logical.transform);
-        println!("     Assigned Monitors:");
-        for (i, connector_info) in logical.assigned_monitors.iter().enumerate() {
-            print_connector_info(Some(i), connector_info);
-        }
+        print_logical_monitor(i, logical, current_state);
     }
 
     Ok(())
@@ -535,145 +569,13 @@ fn determine_mode(rules: &[DisplayRule], current_state: &CurrentState) -> Result
     ))
 }
 
-async fn execute_mode(
-    connection: &Connection,
-    mode: &DisplayMode,
-    current_state: &CurrentState,
-) -> Result<()> {
-    match mode {
-        DisplayMode::Internal => {
-            println!("Switching to internal monitor...");
-            enable_monitors(connection, current_state, true, false, false).await?;
-        }
-        DisplayMode::External => {
-            println!("Switching to external monitor...");
-            enable_monitors(connection, current_state, false, true, false).await?;
-        }
-        DisplayMode::Join => {
-            println!("Joining internal and external monitors...");
-            enable_monitors(connection, current_state, true, true, false).await?;
-        }
-        DisplayMode::Mirror => {
-            println!("Mirroring internal and external monitors...");
-            enable_monitors(connection, current_state, true, true, true).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn watch_and_execute(
-    connection: &Connection,
-    rules: &[DisplayRule],
-    current_state: &CurrentState,
-) -> Result<()> {
-    let proxy = DisplayConfigProxy::new(connection).await?;
-
-    // Create a stream to receive the MonitorsChanged signal
-    let mut stream = proxy.receive_monitors_changed().await?;
-
-    println!("{WATCHING}");
-
-    let mut monitors = current_state.monitors.clone();
-
-    // Poll for signal events
-    while let Some(_) = stream.next().await {
-        // Get the updated state
-        let current_state: CurrentState = proxy.get_current_state().await?.into();
-
-        if current_state.monitors == monitors {
-            continue;
-        }
-
-        monitors = current_state.monitors.clone();
-
-        println!("Monitor configuration changed!");
-
-        // Determine which mode applies based on the connected monitors
-        match determine_mode(rules, &current_state) {
-            Ok(mode) => {
-                // Execute the selected mode
-                if let Err(e) = execute_mode(connection, &mode, &current_state).await {
-                    println!("Failed to apply display configuration: {}", e);
-                }
-            }
-            Err(e) => {
-                println!("No display configuration applied: {}", e);
-            }
-        }
-
-        println!("{WATCHING}");
-    }
-
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = CliArgs::parse();
-
-    // Connect to the session bus
-    let connection = Connection::session()
-        .await
-        .context("Failed to connect to session DBus")?;
-
-    let proxy = DisplayConfigProxy::new(&connection).await?;
-
-    // Get current state
-    let current_state: CurrentState = proxy.get_current_state().await?.into();
-
-    // Handle different commands
-    match &args.command {
-        DisplayCommand::Status { modes } => {
-            display_status(&current_state, *modes).await?;
-            return Ok(());
-        }
-        DisplayCommand::Test(pattern) => {
-            test_pattern_matching(pattern, &current_state).await?;
-            return Ok(());
-        }
-        _ => {}
-    }
-
-    // Extract rules from command
-    let rules = get_rules_from_command(&args.command);
-
-    // If watch flag is enabled, don't exit on initial failure
-    if args.watch {
-        // Try initial configuration but don't exit on failure
-        if let Ok(mode) = determine_mode(&rules, &current_state) {
-            if let Err(e) = execute_mode(&connection, &mode, &current_state).await {
-                println!("Initial configuration failed: {}", e);
-            }
-        } else {
-            println!("Waiting for matching monitors to be connected...");
-        }
-
-        // Start watching for monitor changes
-        watch_and_execute(&connection, &rules, &current_state).await?;
-        return Ok(());
-    }
-
-    // For non-watch mode, determine mode and exit with error if no match
-    match determine_mode(&rules, &current_state) {
-        Ok(mode) => {
-            // Execute the selected mode
-            execute_mode(&connection, &mode, &current_state).await?;
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1); // Exit with error status
-        }
-    }
-
-    Ok(())
-}
-
 async fn enable_monitors(
     connection: &Connection,
     current_state: &CurrentState,
     use_internal: bool,
     use_external: bool,
     mirror_mode: bool,
+    dry_run: bool,
 ) -> Result<()> {
     // Partition monitors into internal and external
     let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
@@ -706,7 +608,7 @@ async fn enable_monitors(
     }
 
     // Generate logical monitor configurations
-    let mut configs = Vec::new();
+    let mut logical_monitors: Vec<ApplyLogicalMonitor> = Vec::new();
 
     if mirror_mode && monitors_to_use.len() > 1 {
         // For mirror mode, create a single logical monitor with all physical monitors
@@ -761,7 +663,7 @@ async fn enable_monitors(
         );
 
         // Create monitor assignments for all monitors with the same resolution
-        let monitor_assignments: Vec<_> = monitors_to_use
+        let assigned_monitors: Vec<ApplyMonitorAssignment> = monitors_to_use
             .iter()
             .map(|monitor| {
                 // Find the mode with matching resolution
@@ -778,16 +680,16 @@ async fn enable_monitors(
                     })
                     .expect("Monitor should have the common resolution mode");
 
-                (
-                    monitor.connector_info.connector.clone(), // connector
-                    mode.id.clone(),                          // mode_id
-                    HashMap::<String, OwnedValue>::new(),     // properties
-                )
+                ApplyMonitorAssignment {
+                    connector: monitor.connector_info.connector.clone(),
+                    mode_id: mode.id.clone(),
+                    properties: monitor.properties.clone(),
+                }
             })
             .collect();
 
         // Get the scale from reference monitor's mode with this resolution - prefer 1.0 scale if possible
-        let reference_scale = reference_monitor
+        let scale = reference_monitor
             .modes
             .iter()
             .find(|m| m.width == common_width && m.height == common_height)
@@ -801,14 +703,18 @@ async fn enable_monitors(
             .unwrap_or(1.0);
 
         // Create a single logical monitor for all physical monitors
-        configs.push((
-            0,                   // x
-            0,                   // y
-            reference_scale,     // scale
-            0u32,                // transform (0 = normal)
-            true,                // primary
-            monitor_assignments, // all monitors assigned to same logical monitor
-        ));
+
+        let logical_monitor = ApplyLogicalMonitor {
+            x: 0,
+            y: 0,
+            scale,
+            transform: 0,
+            primary: true,
+            assigned_monitors,
+            properties: HashMap::new(),
+        };
+
+        logical_monitors.push(logical_monitor);
     } else {
         // For join mode (side by side), use previous logic with scaling fix
         let mut current_x = 0;
@@ -821,28 +727,31 @@ async fn enable_monitors(
                 .find(|m| m.is_preferred)
                 .or_else(|| monitor.modes.first())
             {
-                // Create monitor assignment tuple
-                let monitor_assignment = (
-                    monitor.connector_info.connector.clone(), // connector
-                    mode.id.clone(),                          // mode_id
-                    HashMap::<String, OwnedValue>::new(),     // properties
-                );
+                // Create monitor assignment tuple with the expected format
+
+                let monitor_assignment = ApplyMonitorAssignment {
+                    connector: monitor.connector_info.connector.clone(),
+                    mode_id: mode.id.clone(),
+                    properties: HashMap::new(),
+                };
 
                 // Calculate logical width considering the scale factor
                 let logical_width = (mode.width as f64 / mode.preferred_scale).round() as i32;
-
                 // Create logical monitor config
-                let logical_config = (
-                    current_x,                // x
-                    0,                        // y
-                    mode.preferred_scale,     // scale
-                    0u32,                     // transform (0 = normal)
-                    i == 0,                   // primary (first monitor is primary)
-                    vec![monitor_assignment], // monitors (without properties for logical monitor)
-                );
+
+                let logical_monitor = ApplyLogicalMonitor {
+                    x: current_x,
+                    y: 0,
+                    scale: mode.preferred_scale,
+                    transform: 0u32,
+                    primary: i == 0,
+                    assigned_monitors: vec![monitor_assignment],
+                    properties: HashMap::new(),
+                };
 
                 // Add to configurations
-                configs.push(logical_config);
+
+                logical_monitors.push(logical_monitor);
 
                 // Update position for next monitor using logical width
                 current_x += logical_width;
@@ -850,39 +759,218 @@ async fn enable_monitors(
         }
     }
 
-    if configs.is_empty() {
+    if logical_monitors.is_empty() {
         println!("Failed to create any valid monitor configurations.");
         return Ok(());
     }
 
-    // Prepare method call parameters
-    let method_name = "ApplyMonitorsConfig";
-    let path = "/org/gnome/Mutter/DisplayConfig";
-    let interface = "org.gnome.Mutter.DisplayConfig";
+    if dry_run {
+        println!("[DRY RUN] Would apply the following configuration:");
+        for (i, logical_monitor) in logical_monitors.iter().enumerate() {
+            print_logical_monitor(i, &logical_monitor.clone().into(), current_state);
+        }
+        println!("[DRY RUN] No changes were made");
+        return Ok(());
+    }
 
-    // Properties for the overall config
     let config_properties = HashMap::<String, OwnedValue>::new();
 
-    // Parameters for ApplyMonitorsConfig
-    let params = (
-        current_state.serial, // serial
-        1u32,                 // method (1 = temporary, 2 = persistent)
-        configs,              // logical monitor configs
-        config_properties,    // properties
-    );
+    let proxy = DisplayConfigProxy::new(connection).await?;
 
-    // Call the D-Bus method directly
-    connection
-        .call_method(
-            Some("org.gnome.Mutter.DisplayConfig"),
-            path,
-            Some(interface),
-            method_name,
-            &params,
+    #[rustfmt::skip]
+    proxy
+        .apply_monitors_config(
+            // serial
+            current_state.serial,
+            // method (0 = verify, 1 = temporary, 2 = persistent)
+            1u32,
+            &logical_monitors.iter().map(Into::into).collect::<Vec<_>>(),
+            HashMap::new(),
         )
         .await?;
 
     println!("Monitor configuration applied successfully!");
+    Ok(())
+}
+
+async fn execute_mode(
+    connection: &Connection,
+    mode: &DisplayMode,
+    current_state: &CurrentState,
+    dry_run: bool,
+) -> Result<()> {
+    match mode {
+        DisplayMode::Internal => {
+            if dry_run {
+                println!("[DRY RUN] Would switch to internal monitor only");
+            } else {
+                println!("Switching to internal monitor...");
+            }
+            enable_monitors(connection, current_state, true, false, false, dry_run).await?;
+        }
+        DisplayMode::External => {
+            if dry_run {
+                println!("[DRY RUN] Would switch to external monitor only");
+            } else {
+                println!("Switching to external monitor...");
+            }
+            enable_monitors(connection, current_state, false, true, false, dry_run).await?;
+        }
+        DisplayMode::Join => {
+            if dry_run {
+                println!("[DRY RUN] Would join internal and external monitors");
+            } else {
+                println!("Joining internal and external monitors...");
+            }
+            enable_monitors(connection, current_state, true, true, false, dry_run).await?;
+        }
+        DisplayMode::Mirror => {
+            if dry_run {
+                println!("[DRY RUN] Would mirror internal and external monitors");
+            } else {
+                println!("Mirroring internal and external monitors...");
+            }
+            enable_monitors(connection, current_state, true, true, true, dry_run).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn watch_and_execute(
+    connection: &Connection,
+    rules: &[DisplayRule],
+    current_state: &CurrentState,
+    dry_run: bool,
+) -> Result<()> {
+    let proxy = DisplayConfigProxy::new(connection).await?;
+
+    // Create a stream to receive the MonitorsChanged signal
+    let mut stream = proxy.receive_monitors_changed().await?;
+
+    if dry_run {
+        println!(
+            "{}\n[DRY RUN] {}",
+            WATCHING, "No actual changes will be made"
+        );
+    } else {
+        println!("{}", WATCHING);
+    }
+
+    let mut monitors = current_state.monitors.clone();
+
+    // Poll for signal events
+    while (stream.next().await).is_some() {
+        // Get the updated state
+        let current_state: CurrentState = proxy.get_current_state().await?.into();
+
+        if current_state.monitors == monitors {
+            continue;
+        }
+
+        monitors = current_state.monitors.clone();
+
+        println!("Monitor configuration changed!");
+
+        // Determine which mode applies based on the connected monitors
+        match determine_mode(rules, &current_state) {
+            Ok(mode) => {
+                // Execute the selected mode
+                if let Err(e) = execute_mode(connection, &mode, &current_state, dry_run).await {
+                    println!("Failed to apply display configuration: {}", e);
+                }
+            }
+            Err(e) => {
+                println!("No display configuration applied: {}", e);
+            }
+        }
+
+        if dry_run {
+            println!(
+                "{}\n[DRY RUN] {}",
+                WATCHING, "No actual changes will be made"
+            );
+        } else {
+            println!("{}", WATCHING);
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = CliArgs::parse();
+
+    // Connect to the session bus
+    let connection = Connection::session()
+        .await
+        .context("Failed to connect to session DBus")?;
+
+    let proxy = DisplayConfigProxy::new(&connection).await?;
+
+    // Get current state
+    let current_state: CurrentState = proxy.get_current_state().await?.into();
+
+    // Handle different commands
+    match &args.command {
+        DisplayCommand::Status { modes } => {
+            display_status(&current_state, *modes).await?;
+            return Ok(());
+        }
+        DisplayCommand::Test(pattern) => {
+            // Still handle the Test command for backward compatibility
+            if args.test {
+                println!(
+                    "Note: Using both Test command and --test flag. The Test command is deprecated in favor of the --test flag."
+                );
+            }
+            test_pattern_matching(pattern, &current_state).await?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Extract rules from command
+    let rules = get_rules_from_command(&args.command);
+
+    // Show dry run banner if test mode is enabled
+    if args.test {
+        println!("=== Test Mode Enabled (Dry Run) ===");
+        println!("Changes will be previewed but not applied\n");
+    }
+
+    // If watch flag is enabled, don't exit on initial failure
+    if args.watch {
+        // Try initial configuration but don't exit on failure
+        if let Ok(mode) = determine_mode(&rules, &current_state) {
+            if let Err(e) = execute_mode(&connection, &mode, &current_state, args.test).await {
+                println!("Initial configuration failed: {}", e);
+            }
+        } else {
+            println!("Waiting for matching monitors to be connected...");
+        }
+
+        // Start watching for monitor changes
+        watch_and_execute(&connection, &rules, &current_state, args.test).await?;
+        return Ok(());
+    }
+
+    // For non-watch mode, determine mode and exit with error if no match
+    match determine_mode(&rules, &current_state) {
+        Ok(mode) => {
+            // Execute the selected mode
+            execute_mode(&connection, &mode, &current_state, args.test).await?;
+        }
+        Err(e) => {
+            if args.test {
+                println!("[DRY RUN] Would exit with error: {}", e);
+            } else {
+                eprintln!("Error: {}", e);
+                std::process::exit(1); // Exit with error status
+            }
+        }
+    }
+
     Ok(())
 }
 
