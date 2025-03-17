@@ -1,8 +1,8 @@
-use std::{convert::Infallible, str::FromStr};
+use std::str::FromStr;
 
 use clap::Args;
 
-use crate::Monitor;
+use crate::{Error, Monitor};
 
 #[derive(Debug, Args, Clone, Default)]
 pub struct MonitorPattern {
@@ -63,7 +63,7 @@ impl MonitorPattern {
 }
 
 impl FromStr for MonitorPattern {
-    type Err = Infallible;
+    type Err = Error;
 
     fn from_str(pattern: &str) -> std::result::Result<Self, Self::Err> {
         // Parse patterns like "connector=DP-6", "product=Acer", etc.
@@ -99,10 +99,7 @@ impl FromStr for MonitorPattern {
                 name: Some(value),
                 ..Default::default()
             },
-            _ => Self {
-                name: Some(pattern.to_string()),
-                ..Default::default()
-            },
+            pattern => return Err(Error::InvalidPattern(pattern.to_string())),
         })
     }
 }

@@ -1,6 +1,6 @@
 use std::str::FromStr as _;
 
-use anyhow::Result;
+use crate::Result;
 use clap::Subcommand;
 
 use super::{DisplayMode, DisplayRule, monitor_pattern::MonitorPattern};

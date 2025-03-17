@@ -1,13 +1,13 @@
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{Result, anyhow};
 use futures::StreamExt as _;
 use tokio::time::sleep;
-use zbus::{Connection, zvariant::OwnedValue};
+use zbus::zvariant::OwnedValue;
 
 use crate::{
-    DisplayConfigProxy, Monitor,
+    DisplayConfigProxy, Error, Monitor, Result,
     cli::{DisplayMode, DisplayRule},
+    connect,
     printable_monitor::convert_for_printing,
     structs::{ApplyLogicalMonitorTuple, ConnectorInfo, CurrentLogicalMonitor},
 };
@@ -23,6 +23,45 @@ pub struct CurrentState {
 }
 
 impl CurrentState {
+    pub async fn current(max_attempts: usize) -> Result<Self> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            if attempt > 1 {
+                sleep(Duration::from_secs(1)).await;
+                if attempt >= max_attempts {
+                    return Err(Error::MaxAttempts(max_attempts));
+                }
+            }
+
+            let connection = match connect(10).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("Attempt {attempt}: Failed to connect to DBus: {error}");
+                    continue;
+                }
+            };
+
+            let proxy = match DisplayConfigProxy::new(&connection).await {
+                Ok(proxy) => proxy,
+                Err(error) => {
+                    eprintln!(
+                        "Attempt {attempt}: Failed to connect to DisplayConfigProxy: {error}"
+                    );
+                    continue;
+                }
+            };
+
+            match proxy.get_current_state().await {
+                Ok(state) => return Ok(state.into()),
+                Err(error) => {
+                    eprintln!("Attempt {attempt}: DBus Proxy Error: {error}");
+                    continue;
+                }
+            }
+        }
+    }
+
     pub fn print_connector_info(&self, i: Option<usize>, connector_info: &ConnectorInfo) {
         let (line_0, line_n) = match i {
             Some(i) => (format!("{}. ", i + 1), "   "),
@@ -101,38 +140,34 @@ impl CurrentState {
         Ok(())
     }
 
-    pub async fn enable_monitors(
-        &self,
-        connection: &Connection,
-        mode: &DisplayMode,
-        verify_attempts: usize,
-        dry_run: bool,
-    ) -> Result<()> {
+    pub async fn enable_monitors(mode: &DisplayMode, attempt: usize, dry_run: bool) -> Result<()> {
+        let state = Self::current(10).await?;
+
         // Partition monitors into internal and external
         let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
-            self.monitors.iter().partition(|m| m.is_builtin);
+            state.monitors.iter().partition(|m| m.is_builtin);
 
         let monitors_to_use = match mode {
             DisplayMode::External => {
                 if external_monitors.is_empty() {
-                    println!("No external monitors available.");
+                    eprintln!("No external monitors available.");
                     return Ok(());
                 }
                 external_monitors
             }
             DisplayMode::Internal => {
                 if internal_monitors.is_empty() {
-                    println!("No internal monitors available.");
+                    eprintln!("No internal monitors available.");
                     return Ok(());
                 }
                 internal_monitors
             }
             DisplayMode::Join | DisplayMode::Mirror => {
-                if self.monitors.is_empty() {
-                    println!("No monitors to configure.");
+                if state.monitors.is_empty() {
+                    eprintln!("No monitors to configure.");
                     return Ok(());
                 }
-                self.monitors.iter().collect()
+                state.monitors.iter().collect()
             }
         };
 
@@ -140,19 +175,17 @@ impl CurrentState {
 
         let logical_monitors: Vec<ApplyLogicalMonitorTuple> = match mode {
             DisplayMode::Mirror => build_mirrored(monitors_to_use),
-            _ => build_joined_or_individual(monitors_to_use),
+            _ => build_joined_or_individual(monitors_to_use, mode),
         }?;
 
         if logical_monitors.is_empty() {
-            return Err(anyhow!(
-                "Failed to create any valid monitor configurations."
-            ));
+            return Err(Error::NoMonitorsAvailable(*mode));
         }
 
         if dry_run {
             println!("[TEST MODE] The following configuration would have been applied:");
             for (i, logical) in logical_monitors.iter().enumerate() {
-                let print_monitor = convert_for_printing(logical, &self.monitors);
+                let print_monitor = convert_for_printing(logical, &state.monitors);
                 print_monitor.print(i);
             }
             return Ok(());
@@ -166,116 +199,169 @@ impl CurrentState {
 
         // Parameters for ApplyMonitorsConfig
         let params = (
-            self.serial,              // serial
+            state.serial,             // serial
             1u32,                     // method (1 = temporary, 2 = persistent)
             logical_monitors.clone(), // logical monitor configs
             config_properties,        // properties
         );
 
-        let proxy = DisplayConfigProxy::new(connection).await?;
+        println!("Connecting to DBus (attempt {attempt})...");
+        let connection = connect(10).await?;
 
-        let mut attempts = 0;
-        loop {
-            let reply = connection
-                .call_method(
-                    Some("org.gnome.Mutter.DisplayConfig"),
-                    path,
-                    Some(interface),
-                    method_name,
-                    &params,
-                )
-                .await?;
-            let updated_state: CurrentState = proxy.get_current_state().await?.into();
-            let error = match updated_state.verify_applied_config(&logical_monitors) {
-                Ok(true) => {
-                    println!("✓ Monitor configuration successfully applied.");
-                    return Ok(());
-                }
-                Ok(false) => {
-                    format!(
-                        "✗ Monitor configuration was attempted but failed verification. Reply message: {reply:?}"
-                    )
-                }
-                Err(e) => format!(
-                    "Error during verification of monitor config: {e}. Reply message: {reply:?}"
-                ),
-            };
-            sleep(Duration::from_secs(1)).await;
-            attempts += 1;
-            eprintln!("Attempt {attempts} failed.");
-            if attempts > verify_attempts {
-                return Err(anyhow!(error));
+        let message = connection
+            .call_method(
+                Some("org.gnome.Mutter.DisplayConfig"),
+                path,
+                Some(interface),
+                method_name,
+                &params,
+            )
+            .await?;
+
+        let updated_state = CurrentState::current(10).await?;
+        match updated_state.verify_applied_config(&logical_monitors) {
+            Ok(true) => {
+                println!("✓ Monitor configuration successfully applied.");
+                Ok(())
             }
+            Ok(false) => Err(Error::FailedVerification(message)),
+            Err(error) => Err(error),
         }
     }
 
     pub async fn determine_and_execute_mode(
-        &self,
         rules: &[DisplayRule],
-        connection: &Connection,
-        verify_attempts: usize,
+        attempt: usize,
         dry_run: bool,
     ) -> Result<()> {
-        let mode = self.determine_mode(rules)?;
-        self.enable_monitors(connection, &mode, verify_attempts, dry_run)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn watch_and_execute(
-        &self,
-        rules: &[DisplayRule],
-        connection: &Connection,
-        dry_run: bool,
-    ) -> Result<()> {
-        let proxy = DisplayConfigProxy::new(connection).await?;
-
-        // Create a stream to receive the MonitorsChanged signal
-        let mut stream = proxy.receive_monitors_changed().await?;
-
-        // Execute the selected mode
-        if let Err(e) = self
-            .determine_and_execute_mode(rules, connection, 999_999, dry_run)
-            .await
-        {
-            println!("Failed to apply display configuration: {}", e);
-        }
-
-        println!("{}", WATCHING);
-
-        let mut monitors = self.monitors.clone();
-
-        // Poll for signal events
-        while (stream.next().await).is_some() {
-            // Get the updated state
-            let updated_state: CurrentState = proxy.get_current_state().await?.into();
-
-            if updated_state.monitors == monitors {
-                continue;
+        let mut inner_attempt = 0;
+        loop {
+            inner_attempt += 1;
+            println!("Attempt {inner_attempt} of 3: Determine mode and execute...");
+            if inner_attempt > 1 {
+                sleep(Duration::from_secs(1)).await;
             }
 
-            monitors = updated_state.monitors.clone();
+            let mode = match Self::determine_mode(rules).await {
+                Ok(mode) => mode,
+                Err(Error::NoMonitorsMatch(_)) => {
+                    eprintln!("No monitors match rules, returning OK.");
+                    return Ok(());
+                }
+                Err(error) => {
+                    if inner_attempt < 3 {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
 
-            println!("Monitor configuration changed!");
+            println!("Determined mode: {mode:?}");
+
+            match Self::enable_monitors(&mode, attempt, dry_run).await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    if inner_attempt < 3 {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    pub async fn watch_and_execute(rules: &[DisplayRule], dry_run: bool) -> Result<()> {
+        let mut attempt = 0;
+        'outer: loop {
+            attempt += 1;
+            if attempt > 1 {
+                sleep(Duration::from_secs(1)).await;
+            }
+            eprintln!("Watch attempt: {attempt}");
+
+            // let current_state = Self::current(10).await?;
+
+            let connection = match connect(10).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("Watch attempt {attempt}: Failed to connect to DBus: {error}");
+                    continue;
+                }
+            };
+
+            let proxy = match DisplayConfigProxy::new(&connection).await {
+                Ok(proxy) => proxy,
+                Err(error) => {
+                    eprintln!("Failed to connect to proxy: {error}");
+                    continue;
+                }
+            };
+
+            // Create a stream to receive the MonitorsChanged signal
+            let mut stream = match proxy.receive_monitors_changed().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    eprintln!("Failed to get monitor stream: {error}");
+                    continue;
+                }
+            };
 
             // Execute the selected mode
-            if let Err(e) = self
-                .determine_and_execute_mode(rules, connection, 999_999, dry_run)
-                .await
-            {
-                println!("Failed to apply display configuration: {}", e);
+            match Self::determine_and_execute_mode(rules, attempt, dry_run).await {
+                Ok(_) => (),
+                Err(Error::ZBus(error)) => {
+                    eprintln!("ZBus error: {error}, retrying...");
+                    continue 'outer;
+                }
+                Err(Error::NoMonitorsMatch(_)) => (),
+                Err(error) => {
+                    println!("Failed to apply INITIAL display configuration: {}", error);
+                    continue 'outer;
+                }
             }
 
             println!("{}", WATCHING);
-        }
 
-        Ok(())
+            let mut monitors = Self::current(10).await?.monitors.clone();
+
+            // Poll for signal events
+            while (stream.next().await).is_some() {
+                // Get the updated state
+                let updated_state: CurrentState = proxy.get_current_state().await?.into();
+
+                if updated_state.monitors == monitors {
+                    continue;
+                }
+
+                println!("Monitor configuration changed!");
+
+                monitors = updated_state.monitors.clone();
+
+                // Execute the selected mode
+                match Self::determine_and_execute_mode(rules, attempt, dry_run).await {
+                    Ok(_) => (),
+                    Err(error) => {
+                        eprintln!("Failed to apply CHANGED display configuration: {error}");
+                        eprintln!("Restarting outer loop...");
+                        continue 'outer;
+                    }
+                }
+
+                println!("{}", WATCHING);
+            }
+        }
     }
 
-    fn determine_mode(&self, rules: &[DisplayRule]) -> Result<DisplayMode> {
+    async fn determine_mode(rules: &[DisplayRule]) -> Result<DisplayMode> {
+        let state = Self::current(10).await?;
+
+        if state.monitors.is_empty() {
+            return Err(Error::NoMonitorsAvailable(DisplayMode::Internal));
+        }
+
         // Check each external monitor against the rules
         let (internal_monitors, external_monitors): (Vec<_>, Vec<_>) =
-            self.monitors.iter().partition(|m| m.is_builtin);
+            state.monitors.iter().partition(|m| m.is_builtin);
 
         // Default to external if no rules provided and monitors are available
         if rules.is_empty() {
@@ -295,14 +381,11 @@ impl CurrentState {
                 DisplayMode::External => &external_monitors,
                 DisplayMode::Internal => &internal_monitors,
                 // For modes requiring both types, check all monitors
-                _ => &self.monitors.iter().collect::<Vec<_>>(),
+                _ => &state.monitors.iter().collect::<Vec<_>>(),
             };
 
             if monitors_to_check.is_empty() {
-                return Err(anyhow!(
-                    "No monitors available for {} mode",
-                    format!("{:?}", rule.mode)
-                ));
+                return Err(Error::NoMonitorsAvailable(rule.mode));
             }
 
             // If pattern is not empty, check if any monitor matches the pattern
@@ -312,18 +395,20 @@ impl CurrentState {
                     .any(|monitor| rule.pattern.matches(monitor));
 
                 if !has_match {
-                    return Err(anyhow!("No monitors match the specified filter criteria"));
+                    return Err(Error::NoMonitorsMatch(rules.to_vec()));
                 }
             }
 
             // For modes requiring both monitor types, make sure both exist
             match rule.mode {
                 DisplayMode::Join | DisplayMode::Mirror => {
-                    if external_monitors.is_empty() || internal_monitors.is_empty() {
-                        return Err(anyhow!(
-                            "{:?} mode requires both internal and external monitors",
-                            rule.mode
-                        ));
+                    let len = state.monitors.len();
+                    if len < 2 {
+                        return Err(Error::InsufficientMonitorsAvailable {
+                            available: len,
+                            required: 2,
+                            mode: rule.mode,
+                        });
                     }
                 }
                 _ => {}
@@ -340,7 +425,7 @@ impl CurrentState {
                 let monitors_to_check = match rule.mode {
                     DisplayMode::External => &external_monitors,
                     DisplayMode::Internal => &internal_monitors,
-                    _ => &self.monitors.iter().collect::<Vec<_>>(),
+                    _ => &state.monitors.iter().collect::<Vec<_>>(),
                 };
 
                 if monitors_to_check.is_empty() {
@@ -405,9 +490,7 @@ impl CurrentState {
         }
 
         // No rules matched
-        Err(anyhow!(
-            "No matching monitor configuration found for the specified rules"
-        ))
+        Err(Error::NoMonitorsMatch(rules.to_vec()))
     }
 
     /// Verify if the applied configuration matches what we intended to apply
@@ -547,6 +630,7 @@ impl From<CurrentStateTuple> for CurrentState {
 
 fn build_joined_or_individual(
     monitors_to_use: Vec<&Monitor>,
+    mode: &DisplayMode,
 ) -> Result<Vec<ApplyLogicalMonitorTuple>> {
     // For join mode (side by side), use previous logic with scaling fix
     let mut current_x = 0;
@@ -594,9 +678,7 @@ fn build_joined_or_individual(
     }
 
     if logical_monitors.is_empty() {
-        return Err(anyhow!(
-            "No monitors have any modes -- this should never happen!"
-        ));
+        return Err(Error::NoMonitorsAvailable(*mode));
     }
 
     Ok(logical_monitors)
@@ -610,7 +692,7 @@ fn build_mirrored(monitors_to_use: Vec<&Monitor>) -> Result<Vec<ApplyLogicalMoni
         .iter()
         .find(|m| !m.is_builtin)
         .or_else(|| monitors_to_use.first())
-        .ok_or(anyhow!("no monitors"))?;
+        .ok_or(Error::NoMonitorsAvailable(DisplayMode::Mirror))?;
 
     // Collect all resolutions that every monitor supports
     let mut common_resolutions: Vec<(i32, i32)> = Vec::new();
@@ -641,9 +723,7 @@ fn build_mirrored(monitors_to_use: Vec<&Monitor>) -> Result<Vec<ApplyLogicalMoni
 
     // If no common resolutions found, we can't mirror
     if common_resolutions.is_empty() {
-        return Err(anyhow!(
-            "Error: Could not find a common resolution for all monitors to mirror. Try using 'join' mode instead, or configure only certain monitors."
-        ));
+        return Err(Error::NoCommonResolutionsAvailable);
     }
 
     // Use the highest resolution that all monitors support

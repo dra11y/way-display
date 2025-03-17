@@ -3,6 +3,7 @@ use clap::Parser;
 pub use display_command::DisplayCommand;
 mod monitor_pattern;
 pub use monitor_pattern::MonitorPattern;
+use strum::Display;
 
 /// Manage display (monitor) selection in Wayland environments.
 #[derive(Debug, Parser)]
@@ -26,7 +27,7 @@ pub struct Cli {
     pub command: DisplayCommand,
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Display, clap::ValueEnum)]
 pub enum DisplayMode {
     External,
     Internal,
