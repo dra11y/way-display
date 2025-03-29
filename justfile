@@ -1,6 +1,12 @@
-SERVICE := 'org.gnome.Mutter.DisplayConfig'
-OBJECT_PATH := '/org/gnome/Mutter/DisplayConfig'
-OUTPUT := 'src/display_config_proxy.rs'
+GNOME_SERVICE := 'org.gnome.Mutter.DisplayConfig'
+CINNAMON_SERVICE := 'org.cinnamon.Muffin.DisplayConfig'
+
+GNOME_OBJECT_PATH := '/org/gnome/Mutter/DisplayConfig'
+CINNAMON_OBJECT_PATH := '/org/cinnamon/Muffin/DisplayConfig'
+
+GEN_DIR := 'src/generated'
+GNOME_OUTPUT := '{{GEN_DIR}}/gnome_proxy.rs'
+CINNAMON_OUTPUT := '{{GEN_DIR}}/cinnamon_proxy.rs'
 
 run:
     just install
@@ -32,7 +38,19 @@ clean:
 
 generate-proxy:
     #!/usr/bin/bash
+    mkdir -p {{GEN_DIR}}
     if ! zbus-xmlgen --version; then
         cargo binstall -y zbus_xmlgen
     fi
-    zbus-xmlgen session --output {{OUTPUT}} {{SERVICE}} {{OBJECT_PATH}}
+    # Generate proxies
+    zbus-xmlgen session --output {{GNOME_OUTPUT}} {{GNOME_SERVICE}} {{GNOME_OBJECT_PATH}}
+    zbus-xmlgen session --output {{CINNAMON_OUTPUT}} {{CINNAMON_SERVICE}} {{CINNAMON_OBJECT_PATH}}
+    # Generate mod.rs
+    echo "// Auto-generated module declarations" > {{GEN_DIR}}/mod.rs
+    for f in {{GEN_DIR}}/*.rs; do
+        name=$(basename "$f" .rs)
+        if [ "$name" = "mod" ]; then
+            continue
+        fi
+        echo "pub mod ${name};" >> {{GEN_DIR}}/mod.rs
+    done

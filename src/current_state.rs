@@ -1,18 +1,63 @@
 use std::{collections::HashMap, time::Duration};
 
-use futures::StreamExt as _;
-use tokio::time::sleep;
-use zbus::zvariant::OwnedValue;
-
+use crate::detection::{DbusConfig, DesktopEnvironment};
 use crate::{
-    DisplayConfigProxy, Error, Monitor, Result,
+    Error, Monitor, Result,
     cli::{DisplayMode, DisplayRule},
     connect,
     printable_monitor::convert_for_printing,
     structs::{ApplyLogicalMonitorTuple, ConnectorInfo, CurrentLogicalMonitor},
 };
+use futures::StreamExt as _;
+use tokio::time::sleep;
+use zbus::Connection;
+use zbus::proxy::SignalStream;
+use zbus::zvariant::OwnedValue;
+
+use crate::generated;
 
 const WATCHING: &str = "\nWatching for monitor configuration changes... (Press Ctrl+C to exit)\n";
+
+pub enum DisplayConfigProxy<'a> {
+    Gnome(generated::gnome_proxy::DisplayConfigProxy<'a>),
+    Cinnamon(generated::cinnamon_proxy::DisplayConfigProxy<'a>),
+}
+
+impl<'a> DisplayConfigProxy<'a> {
+    pub async fn new(conn: &'a Connection) -> Result<Self> {
+        match DesktopEnvironment::detect() {
+            DesktopEnvironment::Gnome => Ok(Self::Gnome(
+                generated::gnome_proxy::DisplayConfigProxy::new(conn).await?,
+            )),
+            DesktopEnvironment::Cinnamon => Ok(Self::Cinnamon(
+                generated::cinnamon_proxy::DisplayConfigProxy::new(conn).await?,
+            )),
+            DesktopEnvironment::Unknown(desktop) => Err(Error::UnsupportedDesktop(desktop)),
+        }
+    }
+
+    pub async fn get_current_state(&self) -> Result<CurrentStateTuple> {
+        match self {
+            Self::Gnome(p) => p.get_current_state().await.map_err(Into::into),
+            Self::Cinnamon(p) => p.get_current_state().await.map_err(Into::into),
+        }
+    }
+
+    pub async fn receive_monitors_changed(&self) -> Result<SignalStream<'static>> {
+        match self {
+            DisplayConfigProxy::Gnome(p) => p
+                .receive_monitors_changed()
+                .await
+                .map(|s| s.into_inner())
+                .map_err(Into::into),
+            DisplayConfigProxy::Cinnamon(p) => p
+                .receive_monitors_changed()
+                .await
+                .map(|s| s.into_inner())
+                .map_err(Into::into),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CurrentState {
@@ -191,9 +236,12 @@ impl CurrentState {
             return Ok(());
         }
 
-        let method_name = "ApplyMonitorsConfig";
-        let path = "/org/gnome/Mutter/DisplayConfig";
-        let interface = "org.gnome.Mutter.DisplayConfig";
+        let DbusConfig {
+            interface,
+            path,
+            service,
+            method,
+        } = DesktopEnvironment::detect().dbus_config()?;
 
         let config_properties = HashMap::<String, OwnedValue>::new();
 
@@ -209,13 +257,7 @@ impl CurrentState {
         let connection = connect(10).await?;
 
         let message = connection
-            .call_method(
-                Some("org.gnome.Mutter.DisplayConfig"),
-                path,
-                Some(interface),
-                method_name,
-                &params,
-            )
+            .call_method(Some(service), path, Some(interface), method, &params)
             .await?;
 
         let updated_state = CurrentState::current(10).await?;

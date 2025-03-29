@@ -19,8 +19,9 @@ pub use property_map_ext::PropertyMapExt;
 mod connection;
 pub use connection::connect;
 
-mod display_config_proxy;
-pub use display_config_proxy::*;
+mod detection;
+
+mod generated;
 
 mod structs;
 pub use structs::*;
