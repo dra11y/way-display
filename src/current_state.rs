@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use crate::detection::{DbusConfig, DesktopEnvironment};
+use crate::detection::DesktopEnvironment;
 use crate::{
     Error, Monitor, Result,
     cli::{DisplayMode, DisplayRule},
@@ -236,16 +236,12 @@ impl CurrentState {
             return Ok(());
         }
 
-        let DbusConfig {
-            interface,
-            path,
-            service,
-            method,
-        } = DesktopEnvironment::detect().dbus_config()?;
+        let dbus_config = DesktopEnvironment::detect().dbus_config()?;
 
         let config_properties = HashMap::<String, OwnedValue>::new();
 
         // Parameters for ApplyMonitorsConfig
+        // https://browse.dgit.debian.org/mutter.git/plain/data/dbus-interfaces/org.gnome.Mutter.DisplayConfig.xml
         let params = (
             state.serial,             // serial
             1u32,                     // method (1 = temporary, 2 = persistent)
@@ -256,8 +252,16 @@ impl CurrentState {
         println!("Connecting to DBus (attempt {attempt})...");
         let connection = connect(10).await?;
 
+        println!("Calling DBus method:\n{dbus_config:#?}");
+
         let message = connection
-            .call_method(Some(service), path, Some(interface), method, &params)
+            .call_method(
+                Some(dbus_config.service),
+                dbus_config.path,
+                Some(dbus_config.interface),
+                dbus_config.method,
+                &params,
+            )
             .await?;
 
         let updated_state = CurrentState::current(10).await?;

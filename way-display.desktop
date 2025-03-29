@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Way Display
-Exec=/usr/local/bin/way-display -w auto --external product=Acer --mirror product="LG TV"
-X-GNOME-Autostart-enabled=true
-X-GNOME-AutoRestart=true
-NoDisplay=true

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=set-display
+Exec=/usr/local/bin/set-display -w auto --external product=Acer --mirror product="LG TV"
+X-GNOME-Autostart-enabled=true
+X-GNOME-AutoRestart=true
+NoDisplay=true

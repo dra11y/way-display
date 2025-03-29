@@ -23,18 +23,15 @@ impl DesktopEnvironment {
             .unwrap_or_default()
             .to_lowercase();
 
-        match xdg_desktop.as_str() {
-            "gnome" | "ubuntu:gnome" => DesktopEnvironment::Gnome,
-            "x-cinnamon" => DesktopEnvironment::Cinnamon,
-            _ => {
-                // Fallback detection for GDM or other cases
-                if env::var("GNOME_DESKTOP_SESSION_ID").is_ok() {
-                    DesktopEnvironment::Gnome
-                } else {
-                    DesktopEnvironment::Unknown(xdg_desktop.into())
-                }
-            }
+        if xdg_desktop.contains("cinnamon") {
+            return DesktopEnvironment::Cinnamon;
         }
+
+        if xdg_desktop.contains("gnome") {
+            return DesktopEnvironment::Gnome;
+        }
+
+        DesktopEnvironment::Unknown(xdg_desktop.into())
     }
 
     pub fn dbus_config(&self) -> Result<DbusConfig> {
@@ -47,7 +44,7 @@ impl DesktopEnvironment {
             }),
             Self::Cinnamon => Ok(DbusConfig {
                 service: "org.cinnamon.Muffin.DisplayConfig",
-                path: "/org/cinnamon/Muffin.DisplayConfig",
+                path: "/org/cinnamon/Muffin/DisplayConfig",
                 interface: "org.cinnamon.Muffin.DisplayConfig",
                 method: "ApplyMonitorsConfig",
             }),

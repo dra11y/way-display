@@ -780,6 +780,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "set-display"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures",
+ "strum",
+ "thiserror",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -975,18 +987,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26816d2e1a4a36a2940b96c5296ce403917633dff8f3440e9b236ed6f6bacad2"
 dependencies = [
  "wit-bindgen-rt",
-]
-
-[[package]]
-name = "way-display"
-version = "0.1.0"
-dependencies = [
- "clap",
- "futures",
- "strum",
- "thiserror",
- "tokio",
- "zbus",
 ]
 
 [[package]]
